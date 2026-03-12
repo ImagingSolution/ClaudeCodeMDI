@@ -53,8 +53,8 @@ public class TerminalControl : Control, IDisposable
         set
         {
             _isDark = value;
-            _inputTextBox.Foreground = new SolidColorBrush(_isDark ? Color.FromRgb(204, 204, 204) : Color.FromRgb(30, 30, 30));
-            _inputTextBox.Background = new SolidColorBrush(_isDark ? Color.FromRgb(40, 40, 50) : Color.FromRgb(240, 240, 245));
+            _inputTextBox.Foreground = new SolidColorBrush(_isDark ? Color.FromRgb(210, 210, 215) : Color.FromRgb(28, 28, 30));
+            _inputTextBox.Background = new SolidColorBrush(_isDark ? Color.FromRgb(44, 44, 46) : Color.FromRgb(242, 242, 247));
             InvalidateVisual();
         }
     }
@@ -89,11 +89,11 @@ public class TerminalControl : Control, IDisposable
         // Create input TextBox at the bottom
         _inputTextBox = new TextBox
         {
-            Background = new SolidColorBrush(Color.FromRgb(40, 40, 50)),
-            Foreground = new SolidColorBrush(Color.FromRgb(204, 204, 204)),
-            BorderBrush = new SolidColorBrush(Color.FromRgb(60, 60, 80)),
-            BorderThickness = new Thickness(1),
-            Padding = new Thickness(4, 2),
+            Background = new SolidColorBrush(Color.FromRgb(44, 44, 46)),   // Apple elevated surface
+            Foreground = new SolidColorBrush(Color.FromRgb(210, 210, 215)),
+            BorderBrush = new SolidColorBrush(Color.FromRgb(56, 56, 58)),  // Apple separator
+            BorderThickness = new Thickness(0, 1, 0, 0),
+            Padding = new Thickness(6, 4),
             FontSize = _fontSize,
             FontFamily = new FontFamily("Cascadia Mono, Consolas, Courier New, monospace"),
             Watermark = "IME input here — auto-sent on commit",
@@ -213,8 +213,16 @@ public class TerminalControl : Control, IDisposable
             return;
         }
 
-        // Enter: send newline to PTY
-        if (e.Key == Key.Enter && !e.KeyModifiers.HasFlag(KeyModifiers.Shift))
+        // Shift+Enter: send newline (line feed) for multi-line input
+        if (e.Key == Key.Enter && e.KeyModifiers.HasFlag(KeyModifiers.Shift))
+        {
+            _pty?.WriteInput("\n");
+            e.Handled = true;
+            return;
+        }
+
+        // Enter: send carriage return to PTY (submit)
+        if (e.Key == Key.Enter)
         {
             _pty?.WriteInput("\r");
             e.Handled = true;
@@ -243,7 +251,7 @@ public class TerminalControl : Control, IDisposable
                 Key.End => "\x1b[F",
                 Key.PageUp => "\x1b[5~",
                 Key.PageDown => "\x1b[6~",
-                Key.Tab => "\t",
+                Key.Tab => e.KeyModifiers.HasFlag(KeyModifiers.Shift) ? "\x1b[Z" : "\t",
                 Key.F1 => "\x1bOP",
                 Key.F2 => "\x1bOQ",
                 Key.F3 => "\x1bOR",
@@ -668,15 +676,15 @@ public class TerminalControl : Control, IDisposable
 
     public override void Render(DrawingContext context)
     {
-        var bgDefault = _isDark ? Color.FromRgb(30, 30, 30) : Color.FromRgb(255, 255, 255);
-        var fgDefault = _isDark ? Color.FromRgb(204, 204, 204) : Color.FromRgb(30, 30, 30);
+        var bgDefault = _isDark ? Color.FromRgb(28, 28, 30) : Color.FromRgb(255, 255, 255);    // Apple systemBackground
+        var fgDefault = _isDark ? Color.FromRgb(210, 210, 215) : Color.FromRgb(28, 28, 30);
         double termH = TerminalAreaHeight;
 
         // Draw terminal background
         context.FillRectangle(new SolidColorBrush(bgDefault), new Rect(0, 0, Bounds.Width, termH));
 
         // Draw separator line above input box
-        var sepPen = new Pen(new SolidColorBrush(_isDark ? Color.FromRgb(60, 60, 80) : Color.FromRgb(200, 200, 210)), 1);
+        var sepPen = new Pen(new SolidColorBrush(_isDark ? Color.FromRgb(56, 56, 58) : Color.FromRgb(198, 198, 200)), 0.5);
         context.DrawLine(sepPen, new Point(0, termH), new Point(Bounds.Width, termH));
 
         // Draw scrollbar
@@ -816,6 +824,8 @@ public class TerminalControl : Control, IDisposable
         int gray = (index - 232) * 10 + 8;
         return Color.FromRgb((byte)gray, (byte)gray, (byte)gray);
     }
+
+    public void SendText(string text) => _pty?.WriteInput(text);
 
     public void FocusTerminal()
     {

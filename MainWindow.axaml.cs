@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
+using System.Linq;
 using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Controls.Shapes;
@@ -20,6 +21,7 @@ namespace ClaudeCodeMDI;
 public partial class MainWindow : Window
 {
     private enum MdiLayout { Maximize, Tile, Cascade }
+    private enum SidebarPanel { None, Explorer, Snippets, Settings }
 
     private string? _projectFolder;
     private readonly UsageTracker _usageTracker = new();
@@ -29,8 +31,21 @@ public partial class MainWindow : Window
     private readonly List<MdiChildInfo> _children = new();
     private readonly AppSettings _settings;
 
-    private const string BrowseFolderItem = "📁 Browse folder...";
+    private const string BrowseFolderItem = "\U0001F4C1 Browse folder...";
     private bool _suppressFolderSelectionChanged;
+
+    // Sidebar state
+    private SidebarPanel _activeSidePanel = SidebarPanel.None;
+    private double _sidePanelWidth = 250;
+    private bool _settingsInitialized;
+    private bool _snippetsInitialized;
+    private readonly SnippetStore _snippetStore;
+
+    // Snippet drag state
+    private bool _snippetDragging;
+    private Border? _snippetDragItem;
+    private int _snippetDragIndex;
+    private Point _snippetDragStartPos;
 
     // Drag state
     private bool _isDragging;
@@ -38,6 +53,19 @@ public partial class MainWindow : Window
     private double _dragChildLeft;
     private double _dragChildTop;
     private MdiChildInfo? _dragChild;
+
+    // Font list for settings panel
+    private static readonly List<string> FontList = new()
+    {
+        "Cascadia Mono", "Cascadia Code", "Consolas", "Courier New",
+        "Source Code Pro", "JetBrains Mono", "Fira Code", "Hack",
+        "DejaVu Sans Mono", "Lucida Console",
+        "Segoe UI", "Arial", "Verdana", "Tahoma", "Calibri",
+        "MS Gothic", "BIZ UDGothic", "Yu Gothic", "Yu Gothic UI",
+        "Meiryo", "Meiryo UI", "BIZ UDMincho", "MS Mincho",
+    };
+
+    private static readonly List<string> ThemeList = new() { "Dark", "Light" };
 
     private record MdiChildInfo(
         Border Container,
@@ -55,6 +83,7 @@ public partial class MainWindow : Window
         InitializeComponent();
 
         _settings = AppSettings.Load();
+        _snippetStore = SnippetStore.Load();
         _isDark = _settings.IsDark;
 
         _usageTracker.UsageUpdated += info =>
@@ -81,6 +110,7 @@ public partial class MainWindow : Window
         }
 
         RefreshSessionList();
+        RefreshFileTree();
 
         // Auto-launch claude -c if project folder is valid
         if (!string.IsNullOrEmpty(_projectFolder) && Directory.Exists(_projectFolder))
@@ -90,26 +120,561 @@ public partial class MainWindow : Window
         }
     }
 
+    // ── Sidebar Panel ──
+
+    private void OnActivityExplorer(object? sender, RoutedEventArgs e)
+    {
+        ToggleSidePanel(SidebarPanel.Explorer);
+    }
+
+    private void OnActivitySettings(object? sender, RoutedEventArgs e)
+    {
+        ToggleSidePanel(SidebarPanel.Settings);
+    }
+
+    private void OnActivitySnippets(object? sender, RoutedEventArgs e)
+    {
+        ToggleSidePanel(SidebarPanel.Snippets);
+    }
+
+    private void OnActivityCompact(object? sender, RoutedEventArgs e)
+    {
+        if (_activeChildIndex >= 0 && _activeChildIndex < _children.Count)
+        {
+            _children[_activeChildIndex].Terminal.SendText("/compact\r");
+            BringToFront(_activeChildIndex);
+            _children[_activeChildIndex].Terminal.FocusTerminal();
+        }
+    }
+
+    private void ToggleSidePanel(SidebarPanel panel)
+    {
+        if (_activeSidePanel == panel)
+        {
+            // Close panel
+            SaveSidePanelWidth();
+            _activeSidePanel = SidebarPanel.None;
+            SetSidePanelVisible(false);
+        }
+        else
+        {
+            _activeSidePanel = panel;
+            ShowPanelContent(panel);
+            SetSidePanelVisible(true);
+
+            if (panel == SidebarPanel.Settings && !_settingsInitialized)
+                InitializeSettingsPanel();
+            if (panel == SidebarPanel.Snippets && !_snippetsInitialized)
+                LoadSnippetsPanel();
+        }
+
+        UpdateActivityBarHighlight();
+    }
+
+    private void SetSidePanelVisible(bool visible)
+    {
+        var colDefs = MainContentGrid.ColumnDefinitions;
+
+        if (visible)
+        {
+            colDefs[1].Width = new GridLength(_sidePanelWidth);
+            colDefs[1].MinWidth = 150;
+            colDefs[1].MaxWidth = 600;
+            colDefs[2].Width = new GridLength(4);
+            PanelSplitter.IsVisible = true;
+        }
+        else
+        {
+            colDefs[1].Width = new GridLength(0);
+            colDefs[1].MinWidth = 0;
+            colDefs[1].MaxWidth = 0;
+            colDefs[2].Width = new GridLength(0);
+            PanelSplitter.IsVisible = false;
+        }
+    }
+
+    private void SaveSidePanelWidth()
+    {
+        var w = MainContentGrid.ColumnDefinitions[1].ActualWidth;
+        if (w > 50) _sidePanelWidth = w;
+    }
+
+    private void ShowPanelContent(SidebarPanel panel)
+    {
+        ExplorerPanel.IsVisible = panel == SidebarPanel.Explorer;
+        SettingsPanel.IsVisible = panel == SidebarPanel.Settings;
+        SnippetsPanel.IsVisible = panel == SidebarPanel.Snippets;
+        SidePanelTitle.Text = panel switch
+        {
+            SidebarPanel.Explorer => "EXPLORER",
+            SidebarPanel.Settings => "SETTINGS",
+            SidebarPanel.Snippets => "SNIPPETS",
+            _ => ""
+        };
+    }
+
+    private void UpdateActivityBarHighlight()
+    {
+        SetActivityButtonActive(BtnActivityExplorer, _activeSidePanel == SidebarPanel.Explorer);
+        SetActivityButtonActive(BtnActivitySnippets, _activeSidePanel == SidebarPanel.Snippets);
+        SetActivityButtonActive(BtnActivitySettings, _activeSidePanel == SidebarPanel.Settings);
+    }
+
+    private static void SetActivityButtonActive(Button btn, bool active)
+    {
+        if (active)
+        {
+            if (!btn.Classes.Contains("active"))
+                btn.Classes.Add("active");
+        }
+        else
+        {
+            btn.Classes.Remove("active");
+        }
+    }
+
+    // ── File Tree ──
+
+    private void RefreshFileTree()
+    {
+        if (!string.IsNullOrEmpty(_projectFolder) && Directory.Exists(_projectFolder))
+        {
+            FileTree.ItemsSource = FileTreeNode.CreateRootNodes(_projectFolder);
+        }
+        else
+        {
+            FileTree.ItemsSource = null;
+        }
+    }
+
+    private FileTreeNode? GetSelectedTreeNode()
+    {
+        return FileTree.SelectedItem as FileTreeNode;
+    }
+
+    private void OnTreeItemDoubleTapped(object? sender, TappedEventArgs e)
+    {
+        var node = GetSelectedTreeNode();
+        if (node == null || node.IsDirectory) return;
+        OpenFileDefault(node.FullPath);
+        e.Handled = true;
+    }
+
+    private void OnTreeOpenDefault(object? sender, RoutedEventArgs e)
+    {
+        var node = GetSelectedTreeNode();
+        if (node == null) return;
+
+        if (node.IsDirectory)
+            OpenFolderInExplorer(node.FullPath);
+        else
+            OpenFileDefault(node.FullPath);
+    }
+
+    private void OnTreeOpenWith(object? sender, RoutedEventArgs e)
+    {
+        var node = GetSelectedTreeNode();
+        if (node == null || node.IsDirectory) return;
+        OpenFileWith(node.FullPath);
+    }
+
+    private void OnTreeShowInExplorer(object? sender, RoutedEventArgs e)
+    {
+        var node = GetSelectedTreeNode();
+        if (node == null) return;
+
+        if (node.IsDirectory)
+        {
+            OpenFolderInExplorer(node.FullPath);
+        }
+        else
+        {
+            // Select the file in Explorer
+            try
+            {
+                Process.Start(new ProcessStartInfo
+                {
+                    FileName = "explorer.exe",
+                    Arguments = $"/select,\"{node.FullPath}\"",
+                    UseShellExecute = true
+                });
+            }
+            catch { }
+        }
+    }
+
+    private async void OnTreeCopyPath(object? sender, RoutedEventArgs e)
+    {
+        var node = GetSelectedTreeNode();
+        if (node == null) return;
+
+        try
+        {
+            var clipboard = TopLevel.GetTopLevel(this)?.Clipboard;
+            if (clipboard != null)
+                await clipboard.SetTextAsync(node.FullPath);
+        }
+        catch { }
+    }
+
+    private static void OpenFileDefault(string filePath)
+    {
+        try
+        {
+            Process.Start(new ProcessStartInfo
+            {
+                FileName = filePath,
+                UseShellExecute = true
+            });
+        }
+        catch { }
+    }
+
+    private static void OpenFileWith(string filePath)
+    {
+        try
+        {
+            Process.Start(new ProcessStartInfo
+            {
+                FileName = "rundll32.exe",
+                Arguments = $"shell32.dll,OpenAs_RunDLL \"{filePath}\"",
+                UseShellExecute = false
+            });
+        }
+        catch { }
+    }
+
+    private static void OpenFolderInExplorer(string folderPath)
+    {
+        try
+        {
+            Process.Start(new ProcessStartInfo
+            {
+                FileName = "explorer.exe",
+                Arguments = $"\"{folderPath}\"",
+                UseShellExecute = true
+            });
+        }
+        catch { }
+    }
+
+    // ── Settings Panel (inline) ──
+
+    private void InitializeSettingsPanel()
+    {
+        _settingsInitialized = true;
+
+        var availableFonts = new List<string>();
+        foreach (var name in FontList)
+        {
+            try
+            {
+                var tf = new Typeface(name);
+                if (tf.GlyphTypeface != null)
+                    availableFonts.Add(name);
+            }
+            catch { }
+        }
+        if (availableFonts.Count == 0)
+            availableFonts.AddRange(FontList);
+
+        CmbSettingsFontFamily.ItemsSource = availableFonts;
+        CmbSettingsFontFamily.SelectedItem = availableFonts.Contains(_settings.FontFamily)
+            ? _settings.FontFamily
+            : availableFonts[0];
+
+        NumSettingsFontSize.Value = (decimal)_settings.FontSize;
+
+        CmbSettingsTheme.ItemsSource = ThemeList;
+        CmbSettingsTheme.SelectedItem = _isDark ? "Dark" : "Light";
+    }
+
+    private void OnApplySettings(object? sender, RoutedEventArgs e)
+    {
+        var fontFamily = CmbSettingsFontFamily.SelectedItem as string ?? "Cascadia Mono";
+        var fontSize = (double)(NumSettingsFontSize.Value ?? 14);
+        var isDark = (CmbSettingsTheme.SelectedItem as string) == "Dark";
+
+        _settings.FontFamily = fontFamily;
+        _settings.FontSize = fontSize;
+        _settings.IsDark = isDark;
+        _settings.Save();
+
+        foreach (var child in _children)
+        {
+            child.Terminal.SetFont(_settings.FontFamily, _settings.FontSize);
+        }
+
+        if (_isDark != isDark)
+        {
+            ApplyTheme(isDark);
+        }
+    }
+
+    // ── Snippets Panel ──
+
+    private void LoadSnippetsPanel()
+    {
+        _snippetsInitialized = true;
+        var sorted = _snippetStore.Snippets.OrderBy(s => s.Order).ToList();
+        foreach (var item in sorted)
+        {
+            var border = CreateSnippetEntry(item);
+            // Defer height adjustment until layout is ready
+            if (border.Child is TextBox tb)
+                Dispatcher.UIThread.Post(() => AdjustSnippetHeight(tb), DispatcherPriority.Render);
+        }
+    }
+
+    private static void AdjustSnippetHeight(TextBox textBox)
+    {
+        var text = textBox.Text ?? "";
+        int lineCount = text.Split('\n').Length;
+        if (string.IsNullOrEmpty(text))
+            lineCount = 0;
+
+        // Each line ~ 18px (FontSize 13 + line spacing), padding 12 total
+        double lineHeight = 18;
+        double padding = 16;
+        double contentHeight = Math.Max(1, lineCount) * lineHeight + padding;
+
+        // MinHeight: fit content, but at least 1 line worth
+        textBox.MinHeight = contentHeight;
+    }
+
+    private void OnAddSnippet(object? sender, RoutedEventArgs e)
+    {
+        var item = new SnippetItem { Order = _snippetStore.Snippets.Count };
+        _snippetStore.Snippets.Add(item);
+        var border = CreateSnippetEntry(item);
+        _snippetStore.Save();
+
+        // Focus the new snippet's textbox
+        if (border.Child is Grid g)
+        {
+            var tb = g.Children.OfType<TextBox>().FirstOrDefault();
+            if (tb != null)
+                Dispatcher.UIThread.Post(() => tb.Focus(), DispatcherPriority.Background);
+        }
+    }
+
+    private Border CreateSnippetEntry(SnippetItem item)
+    {
+        var textBox = new TextBox
+        {
+            Text = item.Text,
+            AcceptsReturn = true,
+            TextWrapping = TextWrapping.Wrap,
+            MinHeight = 34,
+            FontSize = 13,
+            Padding = new Thickness(10, 6),
+            CornerRadius = new CornerRadius(0, 8, 8, 0),
+            BorderThickness = new Thickness(0, 1, 1, 1),
+            BorderBrush = new SolidColorBrush(Color.FromRgb(58, 58, 60)),
+            Background = new SolidColorBrush(Color.FromRgb(28, 28, 30)),
+            Foreground = new SolidColorBrush(Color.FromRgb(255, 255, 255)),
+            Watermark = "Enter snippet text...",
+            Classes = { "snippet-text" }
+        };
+
+        // Drag handle (grip area on the left)
+        var dragHandle = new Border
+        {
+            Width = 20,
+            Background = new SolidColorBrush(Color.FromRgb(44, 44, 46)),
+            BorderBrush = new SolidColorBrush(Color.FromRgb(58, 58, 60)),
+            BorderThickness = new Thickness(1, 1, 0, 1),
+            CornerRadius = new CornerRadius(8, 0, 0, 8),
+            Cursor = new Cursor(StandardCursorType.SizeNorthSouth),
+            Child = new TextBlock
+            {
+                Text = "\u2847",  // braille dots as grip icon
+                FontSize = 14,
+                Foreground = new SolidColorBrush(Color.FromRgb(100, 100, 105)),
+                HorizontalAlignment = HorizontalAlignment.Center,
+                VerticalAlignment = VerticalAlignment.Center
+            }
+        };
+
+        var grid = new Grid
+        {
+            ColumnDefinitions = ColumnDefinitions.Parse("Auto,*")
+        };
+        Grid.SetColumn(dragHandle, 0);
+        Grid.SetColumn(textBox, 1);
+        grid.Children.Add(dragHandle);
+        grid.Children.Add(textBox);
+
+        var border = new Border
+        {
+            Child = grid,
+            CornerRadius = new CornerRadius(8),
+            Tag = item
+        };
+
+        // Lost focus: save and adjust height
+        textBox.LostFocus += (_, _) =>
+        {
+            item.Text = textBox.Text ?? "";
+            _snippetStore.Save();
+            AdjustSnippetHeight(textBox);
+        };
+
+        // Right-click context menu
+        textBox.ContextMenu = new ContextMenu
+        {
+            Items =
+            {
+                CreateSnippetMenuItem("Send to Console", "M8 5V19L19 12L8 5Z", () =>
+                {
+                    if (_activeChildIndex >= 0 && _activeChildIndex < _children.Count
+                        && !string.IsNullOrEmpty(textBox.Text))
+                    {
+                        _children[_activeChildIndex].Terminal.SendText(textBox.Text);
+                        BringToFront(_activeChildIndex);
+                        _children[_activeChildIndex].Terminal.FocusTerminal();
+                    }
+                }),
+                new Separator(),
+                CreateSnippetMenuItem("Delete", "M6 19C6 20.1 6.9 21 8 21H16C17.1 21 18 20.1 18 19V7H6V19ZM19 4H15.5L14.5 3H9.5L8.5 4H5V6H19V4Z", () =>
+                {
+                    _snippetStore.Snippets.Remove(item);
+                    SnippetsList.Children.Remove(border);
+                    _snippetStore.Save();
+                })
+            }
+        };
+
+        // Drag-and-drop via drag handle
+        dragHandle.PointerPressed += (_, e) =>
+        {
+            if (e.GetCurrentPoint(dragHandle).Properties.IsLeftButtonPressed)
+            {
+                _snippetDragging = true;
+                _snippetDragItem = border;
+                _snippetDragIndex = SnippetsList.Children.IndexOf(border);
+                _snippetDragStartPos = e.GetPosition(SnippetsList);
+                border.Opacity = 0.6;
+                e.Pointer.Capture(dragHandle);
+                e.Handled = true;
+            }
+        };
+
+        dragHandle.PointerMoved += (_, e) =>
+        {
+            if (!_snippetDragging || _snippetDragItem != border) return;
+
+            var pos = e.GetPosition(SnippetsList);
+
+            // Find which item we're hovering over by Y position
+            int targetIdx = -1;
+            double accY = 0;
+            for (int i = 0; i < SnippetsList.Children.Count; i++)
+            {
+                if (SnippetsList.Children[i] is not Border b) continue;
+                double itemH = b.Bounds.Height + 6; // 6 = StackPanel Spacing
+                if (pos.Y < accY + itemH / 2)
+                {
+                    targetIdx = i;
+                    break;
+                }
+                accY += itemH;
+            }
+            if (targetIdx < 0)
+                targetIdx = SnippetsList.Children.Count - 1;
+
+            int currentIdx = SnippetsList.Children.IndexOf(border);
+            if (targetIdx != currentIdx)
+            {
+                SnippetsList.Children.RemoveAt(currentIdx);
+                SnippetsList.Children.Insert(targetIdx, border);
+                SyncSnippetOrder();
+                // Restore foreground on all TextBoxes after visual tree re-insertion
+                foreach (var child in SnippetsList.Children)
+                {
+                    if (child is Border cb && cb.Child is Grid cg)
+                    {
+                        var ctb = cg.Children.OfType<TextBox>().FirstOrDefault();
+                        if (ctb != null)
+                            ctb.Foreground = new SolidColorBrush(Color.FromRgb(255, 255, 255));
+                    }
+                }
+            }
+
+            e.Handled = true;
+        };
+
+        dragHandle.PointerReleased += (_, e) =>
+        {
+            if (_snippetDragging && _snippetDragItem == border)
+            {
+                _snippetDragging = false;
+                _snippetDragItem = null;
+                border.Opacity = 1.0;
+                // Restore foreground on all snippet TextBoxes after drag
+                foreach (var child in SnippetsList.Children)
+                {
+                    if (child is Border b && b.Child is Grid g)
+                    {
+                        var tb = g.Children.OfType<TextBox>().FirstOrDefault();
+                        if (tb != null)
+                            tb.Foreground = new SolidColorBrush(Color.FromRgb(255, 255, 255));
+                    }
+                }
+                e.Pointer.Capture(null);
+                e.Handled = true;
+            }
+        };
+
+        SnippetsList.Children.Add(border);
+        return border;
+    }
+
+    private static MenuItem CreateSnippetMenuItem(string header, string iconData, Action action)
+    {
+        var menuItem = new MenuItem
+        {
+            Header = header,
+            Icon = new PathIcon { Data = StreamGeometry.Parse(iconData), Width = 14, Height = 14 }
+        };
+        menuItem.Click += (_, _) => action();
+        return menuItem;
+    }
+
+    private void SyncSnippetOrder()
+    {
+        var reordered = new List<SnippetItem>();
+        foreach (var child in SnippetsList.Children)
+        {
+            if (child is Border b && b.Tag is SnippetItem si)
+            {
+                si.Order = reordered.Count;
+                reordered.Add(si);
+            }
+        }
+        _snippetStore.Snippets = reordered;
+        _snippetStore.Save();
+    }
+
+    // ── Project Folder ──
+
     private async void LoadRecentProjectFolders()
     {
         var recentFolders = await SessionService.GetRecentProjectFoldersAsync();
         var items = new List<string>();
 
-        // Add current project folder at top if it's not in the list
         if (!string.IsNullOrEmpty(_projectFolder) && Directory.Exists(_projectFolder))
         {
             items.Add(_projectFolder);
             recentFolders.RemoveAll(f => f.Equals(_projectFolder, StringComparison.OrdinalIgnoreCase));
         }
 
-        // Add recent folders (up to 10 total)
         foreach (var folder in recentFolders)
         {
             if (items.Count >= 10) break;
             items.Add(folder);
         }
 
-        // Add browse option at the bottom
         items.Add(BrowseFolderItem);
 
         _suppressFolderSelectionChanged = true;
@@ -129,7 +694,6 @@ public partial class MainWindow : Window
         {
             if (selected == BrowseFolderItem)
             {
-                // Reset selection to current project folder
                 _suppressFolderSelectionChanged = true;
                 if (!string.IsNullOrEmpty(_projectFolder))
                 {
@@ -143,7 +707,6 @@ public partial class MainWindow : Window
                 }
                 _suppressFolderSelectionChanged = false;
 
-                // Open folder picker
                 var startLocation = !string.IsNullOrEmpty(_projectFolder) && Directory.Exists(_projectFolder)
                     ? await StorageProvider.TryGetFolderFromPathAsync(_projectFolder)
                     : null;
@@ -173,6 +736,7 @@ public partial class MainWindow : Window
         _projectFolder = path;
         StatusFolder.Text = path;
         RefreshSessionList();
+        RefreshFileTree();
     }
 
     private async void RefreshSessionList()
@@ -273,7 +837,6 @@ public partial class MainWindow : Window
         if (w <= 0 || h <= 0) return;
         if (_children.Count == 0) return;
 
-        // Clamp active index
         if (_activeChildIndex < 0 || _activeChildIndex >= _children.Count)
             _activeChildIndex = _children.Count - 1;
 
@@ -363,8 +926,8 @@ public partial class MainWindow : Window
         UpdateStripSelection();
     }
 
-    private static readonly SolidColorBrush ActiveBorder = new(Color.FromRgb(13, 110, 253));
-    private static readonly SolidColorBrush InactiveBorder = new(Color.FromArgb(50, 255, 255, 255));
+    private static readonly SolidColorBrush ActiveBorder = new(Color.FromRgb(0, 122, 255));   // Apple Blue
+    private static readonly SolidColorBrush InactiveBorder = new(Color.FromArgb(40, 255, 255, 255));
 
     private void UpdateStripSelection()
     {
@@ -373,15 +936,13 @@ public partial class MainWindow : Window
             var child = _children[i];
             bool active = i == _activeChildIndex;
 
-            // Strip button highlight
             child.StripButton.Background = active
-                ? new SolidColorBrush(Color.FromArgb(40, 13, 110, 253))
+                ? new SolidColorBrush(Color.FromArgb(30, 0, 122, 255))
                 : Brushes.Transparent;
             child.StripButton.BorderBrush = active
-                ? new SolidColorBrush(Color.FromArgb(80, 13, 110, 253))
+                ? new SolidColorBrush(Color.FromArgb(60, 0, 122, 255))
                 : Brushes.Transparent;
 
-            // Container border highlight
             child.Container.BorderBrush = active ? ActiveBorder : InactiveBorder;
             child.Container.BorderThickness = active ? new Thickness(2) : new Thickness(1);
         }
@@ -397,15 +958,16 @@ public partial class MainWindow : Window
         // --- Title bar ---
         var dot = new Ellipse
         {
-            Width = 7, Height = 7,
-            Fill = new SolidColorBrush(Color.FromRgb(76, 175, 80)),
+            Width = 8, Height = 8,
+            Fill = new SolidColorBrush(Color.FromRgb(48, 209, 88)),  // Apple Green
             VerticalAlignment = VerticalAlignment.Center
         };
         var titleText = new TextBlock
         {
             Text = tabTitle,
-            FontSize = 12,
-            Foreground = new SolidColorBrush(Color.FromRgb(200, 200, 200)),
+            FontSize = 13,
+            FontWeight = FontWeight.Normal,
+            Foreground = new SolidColorBrush(Color.FromRgb(210, 210, 215)),
             VerticalAlignment = VerticalAlignment.Center,
             TextTrimming = TextTrimming.CharacterEllipsis
         };
@@ -415,10 +977,10 @@ public partial class MainWindow : Window
             FontSize = 14,
             Padding = new Thickness(6, 0),
             Background = Brushes.Transparent,
-            Foreground = new SolidColorBrush(Color.FromArgb(150, 255, 255, 255)),
+            Foreground = new SolidColorBrush(Color.FromArgb(120, 255, 255, 255)),
             BorderThickness = new Thickness(0),
             VerticalAlignment = VerticalAlignment.Center,
-            CornerRadius = new CornerRadius(4),
+            CornerRadius = new CornerRadius(6),
             Cursor = new Cursor(StandardCursorType.Hand)
         };
 
@@ -440,11 +1002,11 @@ public partial class MainWindow : Window
 
         var titleBar = new Border
         {
-            Background = new SolidColorBrush(Color.FromRgb(30, 30, 50)),
-            Padding = new Thickness(0, 5),
+            Background = new SolidColorBrush(Color.FromRgb(44, 44, 46)),  // Apple elevated surface
+            Padding = new Thickness(0, 6),
             Child = titleGrid,
             Cursor = new Cursor(StandardCursorType.Hand),
-            CornerRadius = new CornerRadius(6, 6, 0, 0)
+            CornerRadius = new CornerRadius(10, 10, 0, 0)
         };
 
         // --- Container ---
@@ -456,18 +1018,18 @@ public partial class MainWindow : Window
         var container = new Border
         {
             Child = dockPanel,
-            BorderBrush = new SolidColorBrush(Color.FromArgb(50, 255, 255, 255)),
-            BorderThickness = new Thickness(1),
-            CornerRadius = new CornerRadius(6),
+            BorderBrush = new SolidColorBrush(Color.FromArgb(40, 255, 255, 255)),
+            BorderThickness = new Thickness(0.5),
+            CornerRadius = new CornerRadius(10),
             ClipToBounds = true,
-            Background = new SolidColorBrush(Color.FromRgb(30, 30, 30))
+            Background = new SolidColorBrush(Color.FromRgb(28, 28, 30))  // Apple systemBackground
         };
 
         // --- Window strip button ---
         var stripDot = new Ellipse
         {
-            Width = 6, Height = 6,
-            Fill = new SolidColorBrush(Color.FromRgb(76, 175, 80)),
+            Width = 7, Height = 7,
+            Fill = new SolidColorBrush(Color.FromRgb(48, 209, 88)),  // Apple Green
             VerticalAlignment = VerticalAlignment.Center
         };
         var stripText = new TextBlock
@@ -505,8 +1067,8 @@ public partial class MainWindow : Window
             Background = Brushes.Transparent,
             BorderThickness = new Thickness(1),
             BorderBrush = Brushes.Transparent,
-            CornerRadius = new CornerRadius(4),
-            Padding = new Thickness(8, 3),
+            CornerRadius = new CornerRadius(8),
+            Padding = new Thickness(10, 4),
             Cursor = new Cursor(StandardCursorType.Hand)
         };
 
@@ -587,8 +1149,8 @@ public partial class MainWindow : Window
 
         terminal.Exited += () =>
         {
-            dot.Fill = new SolidColorBrush(Color.FromRgb(120, 120, 120));
-            stripDot.Fill = new SolidColorBrush(Color.FromRgb(120, 120, 120));
+            dot.Fill = new SolidColorBrush(Color.FromRgb(142, 142, 147));   // Apple systemGray
+            stripDot.Fill = new SolidColorBrush(Color.FromRgb(142, 142, 147));
             StatusProcess.Text = $"Exited: {titleText.Text}";
             RefreshSessionList();
         };
@@ -646,11 +1208,11 @@ public partial class MainWindow : Window
         UsageBarFill.Width = 130.0 * pct / 100.0;
 
         if (pct < 50)
-            UsageBarFill.Background = new SolidColorBrush(Color.FromRgb(76, 175, 80));
+            UsageBarFill.Background = new SolidColorBrush(Color.FromRgb(48, 209, 88));   // Apple Green
         else if (pct < 80)
-            UsageBarFill.Background = new SolidColorBrush(Color.FromRgb(255, 193, 7));
+            UsageBarFill.Background = new SolidColorBrush(Color.FromRgb(255, 214, 10));  // Apple Yellow
         else
-            UsageBarFill.Background = new SolidColorBrush(Color.FromRgb(244, 67, 54));
+            UsageBarFill.Background = new SolidColorBrush(Color.FromRgb(255, 69, 58));   // Apple Red
 
         StatusUsageDetail.Text = $"{info.TodayMessages} msgs / {info.TodaySessions} sessions";
     }
@@ -660,35 +1222,12 @@ public partial class MainWindow : Window
         StatusTabs.Text = $"{_children.Count} windows";
     }
 
-    private async void OnSettings(object? sender, RoutedEventArgs e)
-    {
-        var dlg = new SettingsWindow(_settings.FontFamily, _settings.FontSize, _isDark);
-        await dlg.ShowDialog(this);
-
-        if (dlg.Confirmed)
-        {
-            _settings.FontFamily = dlg.SelectedFontFamily;
-            _settings.FontSize = dlg.SelectedFontSize;
-            _settings.IsDark = dlg.SelectedIsDark;
-            _settings.Save();
-
-            foreach (var child in _children)
-            {
-                child.Terminal.SetFont(_settings.FontFamily, _settings.FontSize);
-            }
-
-            if (_isDark != dlg.SelectedIsDark)
-            {
-                ApplyTheme(dlg.SelectedIsDark);
-            }
-        }
-    }
-
     protected override void OnClosed(EventArgs e)
     {
         base.OnClosed(e);
         _settings.ProjectFolder = _projectFolder ?? "";
         _settings.Save();
+        _snippetStore.Save();
         foreach (var child in _children)
         {
             child.Terminal.Dispose();

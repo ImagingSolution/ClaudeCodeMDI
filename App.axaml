@@ -6,99 +6,102 @@
     <Application.Styles>
         <FluentTheme />
 
-        <!-- Modern Button Style -->
+        <!-- Apple-style Toolbar Button -->
         <Style Selector="Button.toolbar">
             <Setter Property="Background" Value="Transparent" />
             <Setter Property="BorderThickness" Value="0" />
-            <Setter Property="CornerRadius" Value="6" />
-            <Setter Property="Padding" Value="10,6" />
-            <Setter Property="FontSize" Value="12" />
+            <Setter Property="CornerRadius" Value="8" />
+            <Setter Property="Padding" Value="12,7" />
+            <Setter Property="FontSize" Value="13" />
             <Setter Property="Cursor" Value="Hand" />
             <Setter Property="Opacity" Value="0.85" />
         </Style>
         <Style Selector="Button.toolbar:pointerover">
-            <Setter Property="Background" Value="#30FFFFFF" />
+            <Setter Property="Background" Value="#18FFFFFF" />
             <Setter Property="Opacity" Value="1" />
         </Style>
         <Style Selector="Button.toolbar:pressed">
-            <Setter Property="Background" Value="#20FFFFFF" />
+            <Setter Property="Background" Value="#10FFFFFF" />
         </Style>
 
-        <!-- Icon Button Style -->
+        <!-- Apple-style Icon Button -->
         <Style Selector="Button.icon-btn">
             <Setter Property="Background" Value="Transparent" />
             <Setter Property="BorderThickness" Value="0" />
-            <Setter Property="CornerRadius" Value="6" />
+            <Setter Property="CornerRadius" Value="8" />
             <Setter Property="Padding" Value="8,6" />
             <Setter Property="Cursor" Value="Hand" />
-            <Setter Property="Opacity" Value="0.7" />
+            <Setter Property="Opacity" Value="0.6" />
         </Style>
         <Style Selector="Button.icon-btn:pointerover">
-            <Setter Property="Background" Value="#25FFFFFF" />
+            <Setter Property="Background" Value="#18FFFFFF" />
             <Setter Property="Opacity" Value="1" />
         </Style>
+        <Style Selector="Button.icon-btn:pressed">
+            <Setter Property="Background" Value="#10FFFFFF" />
+        </Style>
 
-        <!-- Primary accent button -->
+        <!-- Apple-style Primary Button (system blue) -->
         <Style Selector="Button.primary">
-            <Setter Property="Background" Value="#0D6EFD" />
+            <Setter Property="Background" Value="#007AFF" />
             <Setter Property="Foreground" Value="White" />
             <Setter Property="BorderThickness" Value="0" />
-            <Setter Property="CornerRadius" Value="6" />
-            <Setter Property="Padding" Value="14,6" />
-            <Setter Property="FontSize" Value="12" />
-            <Setter Property="FontWeight" Value="SemiBold" />
+            <Setter Property="CornerRadius" Value="8" />
+            <Setter Property="Padding" Value="16,7" />
+            <Setter Property="FontSize" Value="13" />
+            <Setter Property="FontWeight" Value="Medium" />
             <Setter Property="Cursor" Value="Hand" />
         </Style>
         <Style Selector="Button.primary:pointerover">
-            <Setter Property="Background" Value="#3D8BFD" />
+            <Setter Property="Background" Value="#0A84FF" />
         </Style>
         <Style Selector="Button.primary:pressed">
-            <Setter Property="Background" Value="#0A58CA" />
+            <Setter Property="Background" Value="#0064D2" />
         </Style>
         <Style Selector="Button.primary:disabled">
-            <Setter Property="Background" Value="#30FFFFFF" />
-            <Setter Property="Foreground" Value="#60FFFFFF" />
+            <Setter Property="Background" Value="#1A3A3C" />
+            <Setter Property="Foreground" Value="#48484A" />
         </Style>
 
-        <!-- Modern TextBox -->
+        <!-- Apple-style TextBox -->
         <Style Selector="TextBox.modern">
-            <Setter Property="CornerRadius" Value="6" />
+            <Setter Property="CornerRadius" Value="8" />
             <Setter Property="BorderThickness" Value="1" />
-            <Setter Property="BorderBrush" Value="#40FFFFFF" />
-            <Setter Property="Background" Value="#15FFFFFF" />
-            <Setter Property="Padding" Value="8,5" />
-            <Setter Property="FontSize" Value="12" />
+            <Setter Property="BorderBrush" Value="#3A3A3C" />
+            <Setter Property="Background" Value="#1C1C1E" />
+            <Setter Property="Padding" Value="10,6" />
+            <Setter Property="FontSize" Value="13" />
         </Style>
         <Style Selector="TextBox.modern:focus">
-            <Setter Property="BorderBrush" Value="#0D6EFD" />
+            <Setter Property="BorderBrush" Value="#007AFF" />
         </Style>
 
-        <!-- Modern ComboBox -->
+        <!-- Apple-style ComboBox -->
         <Style Selector="ComboBox.modern">
-            <Setter Property="CornerRadius" Value="6" />
+            <Setter Property="CornerRadius" Value="8" />
             <Setter Property="BorderThickness" Value="1" />
-            <Setter Property="BorderBrush" Value="#40FFFFFF" />
-            <Setter Property="Background" Value="#15FFFFFF" />
-            <Setter Property="Padding" Value="8,4" />
-            <Setter Property="FontSize" Value="12" />
+            <Setter Property="BorderBrush" Value="#3A3A3C" />
+            <Setter Property="Background" Value="#1C1C1E" />
+            <Setter Property="Padding" Value="10,5" />
+            <Setter Property="FontSize" Value="13" />
         </Style>
 
-        <!-- Modern ToggleButton -->
+        <!-- Apple-style ToggleButton -->
         <Style Selector="ToggleButton.toolbar">
             <Setter Property="Background" Value="Transparent" />
             <Setter Property="BorderThickness" Value="0" />
-            <Setter Property="CornerRadius" Value="6" />
-            <Setter Property="Padding" Value="10,6" />
-            <Setter Property="FontSize" Value="12" />
+            <Setter Property="CornerRadius" Value="8" />
+            <Setter Property="Padding" Value="12,7" />
+            <Setter Property="FontSize" Value="13" />
             <Setter Property="Cursor" Value="Hand" />
             <Setter Property="Opacity" Value="0.85" />
         </Style>
         <Style Selector="ToggleButton.toolbar:pointerover">
-            <Setter Property="Background" Value="#30FFFFFF" />
+            <Setter Property="Background" Value="#18FFFFFF" />
             <Setter Property="Opacity" Value="1" />
         </Style>
         <Style Selector="ToggleButton.toolbar:checked">
-            <Setter Property="Background" Value="#20FFFFFF" />
+            <Setter Property="Background" Value="#18FFFFFF" />
         </Style>
 
         <!-- Tab styling -->
@@ -106,18 +109,45 @@
             <Setter Property="Background" Value="Transparent" />
         </Style>
         <Style Selector="TabItem">
-            <Setter Property="FontSize" Value="12" />
-            <Setter Property="Padding" Value="12,6" />
+            <Setter Property="FontSize" Value="13" />
+            <Setter Property="Padding" Value="14,7" />
+        </Style>
+
+        <!-- Apple-style Activity Bar Button (sidebar icons) -->
+        <Style Selector="Button.activity-btn">
+            <Setter Property="Background" Value="Transparent" />
+            <Setter Property="BorderThickness" Value="0" />
+            <Setter Property="BorderBrush" Value="Transparent" />
+            <Setter Property="Width" Value="48" />
+            <Setter Property="Height" Value="48" />
+            <Setter Property="Padding" Value="0" />
+            <Setter Property="Cursor" Value="Hand" />
+            <Setter Property="Opacity" Value="0.45" />
+            <Setter Property="HorizontalContentAlignment" Value="Center" />
+            <Setter Property="VerticalContentAlignment" Value="Center" />
+            <Setter Property="CornerRadius" Value="10" />
+            <Setter Property="Margin" Value="4,1" />
+        </Style>
+        <Style Selector="Button.activity-btn:pointerover">
+            <Setter Property="Background" Value="#18FFFFFF" />
+            <Setter Property="Opacity" Value="0.9" />
+        </Style>
+        <Style Selector="Button.activity-btn.active">
+            <Setter Property="Opacity" Value="1" />
+            <Setter Property="Background" Value="#18FFFFFF" />
         </Style>
     </Application.Styles>
 
     <Application.Resources>
-        <SolidColorBrush x:Key="ToolBarBg" Color="#1A1A2E" />
-        <SolidColorBrush x:Key="StatusBarBg" Color="#0F0F1A" />
-        <SolidColorBrush x:Key="SurfaceBg" Color="#16162A" />
-        <SolidColorBrush x:Key="AccentBlue" Color="#0D6EFD" />
-        <SolidColorBrush x:Key="AccentGreen" Color="#00C853" />
-        <SolidColorBrush x:Key="SubtleText" Color="#80FFFFFF" />
-        <SolidColorBrush x:Key="DividerColor" Color="#20FFFFFF" />
+        <!-- Apple Dark Mode palette -->
+        <SolidColorBrush x:Key="ToolBarBg" Color="#2C2C2E" />
+        <SolidColorBrush x:Key="StatusBarBg" Color="#1C1C1E" />
+        <SolidColorBrush x:Key="SurfaceBg" Color="#000000" />
+        <SolidColorBrush x:Key="AccentBlue" Color="#007AFF" />
+        <SolidColorBrush x:Key="AccentGreen" Color="#30D158" />
+        <SolidColorBrush x:Key="SubtleText" Color="#98989D" />
+        <SolidColorBrush x:Key="DividerColor" Color="#38383A" />
+        <SolidColorBrush x:Key="ActivityBarBg" Color="#1C1C1E" />
+        <SolidColorBrush x:Key="SidePanelBg" Color="#2C2C2E" />
     </Application.Resources>
 </Application>

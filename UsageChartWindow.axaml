@@ -5,44 +5,44 @@
         Width="650" Height="440"
         WindowStartupLocation="CenterOwner"
         CanResize="False"
-        Background="#0D0D1A">
+        Background="#1C1C1E">
 
-    <DockPanel Margin="20">
+    <DockPanel Margin="24">
         <!-- Header -->
-        <StackPanel DockPanel.Dock="Top" Margin="0,0,0,16">
+        <StackPanel DockPanel.Dock="Top" Margin="0,0,0,20">
             <TextBlock Text="Daily Usage"
-                       FontSize="20" FontWeight="Bold"
+                       FontSize="22" FontWeight="SemiBold"
                        Foreground="White" />
             <TextBlock Text="Last 14 days activity overview"
-                       FontSize="12" Foreground="#60FFFFFF" Margin="0,2,0,0" />
+                       FontSize="13" Foreground="#98989D" Margin="0,4,0,0" />
         </StackPanel>
 
         <!-- Legend -->
-        <Border DockPanel.Dock="Bottom" Background="#10FFFFFF"
-                CornerRadius="8" Padding="12,8" Margin="0,12,0,0">
-            <StackPanel Orientation="Horizontal" Spacing="24"
+        <Border DockPanel.Dock="Bottom" Background="#2C2C2E"
+                CornerRadius="12" Padding="16,10" Margin="0,16,0,0">
+            <StackPanel Orientation="Horizontal" Spacing="28"
                         HorizontalAlignment="Center">
-                <StackPanel Orientation="Horizontal" Spacing="6">
-                    <Border Width="14" Height="14" Background="#4CAF50" CornerRadius="3" />
-                    <TextBlock Text="Messages" FontSize="12"
-                               Foreground="#B0FFFFFF" VerticalAlignment="Center" />
+                <StackPanel Orientation="Horizontal" Spacing="8">
+                    <Border Width="14" Height="14" Background="#30D158" CornerRadius="4" />
+                    <TextBlock Text="Messages" FontSize="13"
+                               Foreground="#98989D" VerticalAlignment="Center" />
                 </StackPanel>
-                <StackPanel Orientation="Horizontal" Spacing="6">
-                    <Border Width="14" Height="14" Background="#2196F3" CornerRadius="3" />
-                    <TextBlock Text="Tool Calls" FontSize="12"
-                               Foreground="#B0FFFFFF" VerticalAlignment="Center" />
+                <StackPanel Orientation="Horizontal" Spacing="8">
+                    <Border Width="14" Height="14" Background="#0A84FF" CornerRadius="4" />
+                    <TextBlock Text="Tool Calls" FontSize="13"
+                               Foreground="#98989D" VerticalAlignment="Center" />
                 </StackPanel>
-                <StackPanel Orientation="Horizontal" Spacing="6">
-                    <Border Width="14" Height="14" Background="#FF9800" CornerRadius="3" />
-                    <TextBlock Text="Sessions" FontSize="12"
-                               Foreground="#B0FFFFFF" VerticalAlignment="Center" />
+                <StackPanel Orientation="Horizontal" Spacing="8">
+                    <Border Width="14" Height="14" Background="#FF9F0A" CornerRadius="4" />
+                    <TextBlock Text="Sessions" FontSize="13"
+                               Foreground="#98989D" VerticalAlignment="Center" />
                 </StackPanel>
             </StackPanel>
         </Border>
 
         <!-- Chart canvas -->
-        <Border BorderBrush="#20FFFFFF" BorderThickness="1" CornerRadius="8"
-                Padding="0" ClipToBounds="True" Background="#08FFFFFF">
+        <Border BorderBrush="#38383A" BorderThickness="0.5" CornerRadius="12"
+                Padding="0" ClipToBounds="True" Background="#2C2C2E">
             <Canvas x:Name="ChartCanvas" />
         </Border>
     </DockPanel>
