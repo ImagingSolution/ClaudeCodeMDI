@@ -5,10 +5,11 @@
     <Nullable>enable</Nullable>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon>icon.ico</ApplicationIcon>
     <AvaloniaUseCompiledBindingsByDefault>true</AvaloniaUseCompiledBindingsByDefault>
-    <Version>0.1.0.$([System.DateTime]::UtcNow.Subtract($([System.DateTime]::new(2025,1,1))).Days)</Version>
-    <AssemblyVersion>0.1.0.$([System.DateTime]::UtcNow.Subtract($([System.DateTime]::new(2025,1,1))).Days)</AssemblyVersion>
-    <FileVersion>0.1.0.$([System.DateTime]::UtcNow.Subtract($([System.DateTime]::new(2025,1,1))).Days)</FileVersion>
+    <Version>0.1.1.$([System.DateTime]::UtcNow.Subtract($([System.DateTime]::new(2025,1,1))).Days)</Version>
+    <AssemblyVersion>0.1.1.$([System.DateTime]::UtcNow.Subtract($([System.DateTime]::new(2025,1,1))).Days)</AssemblyVersion>
+    <FileVersion>0.1.1.$([System.DateTime]::UtcNow.Subtract($([System.DateTime]::new(2025,1,1))).Days)</FileVersion>
   </PropertyGroup>
 
   <ItemGroup>
@@ -20,5 +21,9 @@
       <IncludeAssets Condition="'$(Configuration)' != 'Debug'">None</IncludeAssets>
       <PrivateAssets Condition="'$(Configuration)' != 'Debug'">All</PrivateAssets>
     </PackageReference>
+  </ItemGroup>
+
+  <ItemGroup>
+    <AvaloniaResource Include="icon.ico" />
   </ItemGroup>
 </Project>

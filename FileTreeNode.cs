@@ -50,12 +50,6 @@ public class FileTreeNode : INotifyPropertyChanged
     private static readonly IBrush DefaultFileColor = new SolidColorBrush(Color.Parse("#8C8C8C"));
     private static readonly IBrush FolderColor = new SolidColorBrush(Color.Parse("#DCAD54"));
 
-    private static readonly HashSet<string> SkipDirs = new(StringComparer.OrdinalIgnoreCase)
-    {
-        "bin", "obj", "node_modules", ".git", ".vs", ".idea",
-        "__pycache__", "dist", "build", ".next", "packages"
-    };
-
     public string Name { get; set; } = "";
     public string FullPath { get; set; } = "";
     public bool IsDirectory { get; set; }
@@ -117,13 +111,10 @@ public class FileTreeNode : INotifyPropertyChanged
         try
         {
             var dirs = Directory.GetDirectories(FullPath)
-                .Select(d => new { Path = d, Name = Path.GetFileName(d) })
-                .Where(d => !d.Name.StartsWith('.') || d.Name is ".github" or ".claude")
-                .Where(d => !SkipDirs.Contains(d.Name))
-                .OrderBy(d => d.Name, StringComparer.OrdinalIgnoreCase);
+                .OrderBy(d => Path.GetFileName(d), StringComparer.OrdinalIgnoreCase);
 
             foreach (var dir in dirs)
-                Children.Add(CreateForPath(dir.Path, true));
+                Children.Add(CreateForPath(dir, true));
 
             var files = Directory.GetFiles(FullPath)
                 .OrderBy(f => Path.GetFileName(f), StringComparer.OrdinalIgnoreCase);
@@ -140,13 +131,10 @@ public class FileTreeNode : INotifyPropertyChanged
         try
         {
             var dirs = Directory.GetDirectories(rootPath)
-                .Select(d => new { Path = d, Name = Path.GetFileName(d) })
-                .Where(d => !d.Name.StartsWith('.') || d.Name is ".github" or ".claude")
-                .Where(d => !SkipDirs.Contains(d.Name))
-                .OrderBy(d => d.Name, StringComparer.OrdinalIgnoreCase);
+                .OrderBy(d => Path.GetFileName(d), StringComparer.OrdinalIgnoreCase);
 
             foreach (var dir in dirs)
-                nodes.Add(CreateForPath(dir.Path, true));
+                nodes.Add(CreateForPath(dir, true));
 
             var files = Directory.GetFiles(rootPath)
                 .OrderBy(f => Path.GetFileName(f), StringComparer.OrdinalIgnoreCase);

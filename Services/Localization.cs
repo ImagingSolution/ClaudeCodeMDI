@@ -48,7 +48,7 @@ public static class Loc
         ["ConsoleSettings"] = new() { ["English"] = "Console Settings", ["日本語"] = "コンソール設定" },
         ["FontFamily"] = new() { ["English"] = "Font Family", ["日本語"] = "フォント" },
         ["FontSize"] = new() { ["English"] = "Font Size", ["日本語"] = "フォントサイズ" },
-        ["Theme"] = new() { ["English"] = "Theme", ["日本語"] = "テーマ" },
+        ["InitialPrompt"] = new() { ["English"] = "Initial Prompt", ["日本語"] = "初期プロンプト" },
         ["LanguageSetting"] = new() { ["English"] = "Language", ["日本語"] = "言語" },
         ["Apply"] = new() { ["English"] = "Apply", ["日本語"] = "適用" },
 
@@ -71,6 +71,15 @@ public static class Loc
 
         // ── Usage Chart ──
         ["ClickToShowUsage"] = new() { ["English"] = "Click to show usage chart", ["日本語"] = "クリックして使用状況チャートを表示" },
+
+        // ── Welcome Page ──
+        ["WelcomeTitle"] = new() { ["English"] = "Claude Code MDI", ["日本語"] = "Claude Code MDI" },
+        ["Start"] = new() { ["English"] = "Start", ["日本語"] = "開始" },
+        ["NewProject"] = new() { ["English"] = "New Project", ["日本語"] = "新しいプロジェクト" },
+        ["PreviousProject"] = new() { ["English"] = "Previous Project", ["日本語"] = "前回のプロジェクト" },
+        ["Recent"] = new() { ["English"] = "Recent", ["日本語"] = "最近" },
+        ["ShowWelcomeOnStartup"] = new() { ["English"] = "Show Welcome Page on Startup", ["日本語"] = "起動時にウェルカムページを表示" },
+        ["ShowWelcomePage"] = new() { ["English"] = "Show Welcome Page", ["日本語"] = "ウェルカムページを表示" },
     };
 
     public static string Get(string key)

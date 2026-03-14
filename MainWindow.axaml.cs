@@ -66,7 +66,6 @@ public partial class MainWindow : Window
         "Meiryo", "Meiryo UI", "BIZ UDMincho", "MS Mincho",
     };
 
-    private static readonly List<string> ThemeList = new() { "Dark", "Light" };
     private static readonly List<string> LanguageList = new() { "English", "日本語" };
 
     private record MdiChildInfo(
@@ -78,7 +77,10 @@ public partial class MainWindow : Window
         TerminalControl Terminal,
         Button StripButton,
         TextBlock StripText
-    );
+    )
+    {
+        public string? ProjectFolder { get; set; }
+    };
 
     public MainWindow()
     {
@@ -100,12 +102,6 @@ public partial class MainWindow : Window
             Dispatcher.UIThread.Post(ArrangeChildren, DispatcherPriority.Render);
         };
 
-        // Apply saved theme
-        if (!_isDark && Application.Current is App app)
-        {
-            app.SetTheme(false);
-        }
-
         // Apply saved language
         Loc.Language = _settings.Language;
         ApplyLocalization();
@@ -114,11 +110,14 @@ public partial class MainWindow : Window
         RefreshSessionList();
         RefreshFileTree();
 
-        // Auto-launch claude -c if project folder is valid
-        if (!string.IsNullOrEmpty(_projectFolder) && Directory.Exists(_projectFolder))
+        // Show welcome page or auto-launch
+        if (_settings.ShowWelcomePage)
         {
-            Dispatcher.UIThread.Post(() => CreateNewChild("claude -c", "Claude"),
-                DispatcherPriority.Background);
+            Dispatcher.UIThread.Post(ShowWelcomePage, DispatcherPriority.Background);
+        }
+        else if (!string.IsNullOrEmpty(_projectFolder) && Directory.Exists(_projectFolder))
+        {
+            Dispatcher.UIThread.Post(LaunchClaudeWithInitialPrompt, DispatcherPriority.Background);
         }
     }
 
@@ -160,9 +159,10 @@ public partial class MainWindow : Window
         LblLanguage.Text = Loc.Get("LanguageSetting");
         LblFontFamily.Text = Loc.Get("FontFamily");
         LblFontSize.Text = Loc.Get("FontSize");
-        LblTheme.Text = Loc.Get("Theme");
-        BtnApplySettings.Content = Loc.Get("Apply");
+        LblInitialPrompt.Text = Loc.Get("InitialPrompt");
+        LblApplySettings.Text = Loc.Get("Apply");
         LblOpenClaudeFolder.Text = Loc.Get("OpenClaudeFolder");
+        ChkShowWelcomePage.Content = Loc.Get("ShowWelcomePage");
 
         // Snippets panel
         LblAddSnippet.Text = Loc.Get("AddSnippet");
@@ -193,6 +193,15 @@ public partial class MainWindow : Window
     private void OnActivitySnippets(object? sender, RoutedEventArgs e)
     {
         ToggleSidePanel(SidebarPanel.Snippets);
+    }
+
+    private void OnActivityModeSwitch(object? sender, RoutedEventArgs e)
+    {
+        if (_activeChildIndex >= 0 && _activeChildIndex < _children.Count)
+        {
+            _children[_activeChildIndex].Terminal.SendText("\x1b[Z"); // Shift+Tab
+            _children[_activeChildIndex].Terminal.FocusTerminal();
+        }
     }
 
     private void OnActivityCompact(object? sender, RoutedEventArgs e)
@@ -442,8 +451,23 @@ public partial class MainWindow : Window
 
         NumSettingsFontSize.Value = (decimal)_settings.FontSize;
 
-        CmbSettingsTheme.ItemsSource = ThemeList;
-        CmbSettingsTheme.SelectedItem = _isDark ? "Dark" : "Light";
+        TxtInitialPrompt.Text = _settings.InitialPrompt;
+        TxtInitialPrompt.LostFocus += (_, _) =>
+        {
+            _settings.InitialPrompt = TxtInitialPrompt.Text?.Trim() ?? "-c";
+            _settings.Save();
+        };
+
+        ChkShowWelcomePage.IsChecked = _settings.ShowWelcomePage;
+    }
+
+    private bool _suppressWelcomeCheckChanged;
+
+    private void OnShowWelcomePageChanged(object? sender, RoutedEventArgs e)
+    {
+        if (_suppressWelcomeCheckChanged) return;
+        _settings.ShowWelcomePage = ChkShowWelcomePage.IsChecked == true;
+        _settings.Save();
     }
 
     private void OnApplySettings(object? sender, RoutedEventArgs e)
@@ -451,12 +475,9 @@ public partial class MainWindow : Window
         var language = CmbSettingsLanguage.SelectedItem as string ?? "English";
         var fontFamily = CmbSettingsFontFamily.SelectedItem as string ?? "Cascadia Mono";
         var fontSize = (double)(NumSettingsFontSize.Value ?? 14);
-        var isDark = (CmbSettingsTheme.SelectedItem as string) == "Dark";
-
         _settings.Language = language;
         _settings.FontFamily = fontFamily;
         _settings.FontSize = fontSize;
-        _settings.IsDark = isDark;
         _settings.Save();
 
         Loc.Language = language;
@@ -465,11 +486,6 @@ public partial class MainWindow : Window
         foreach (var child in _children)
         {
             child.Terminal.SetFont(_settings.FontFamily, _settings.FontSize);
-        }
-
-        if (_isDark != isDark)
-        {
-            ApplyTheme(isDark);
         }
     }
 
@@ -663,7 +679,7 @@ public partial class MainWindow : Window
             for (int i = 0; i < SnippetsList.Children.Count; i++)
             {
                 if (SnippetsList.Children[i] is not Border b) continue;
-                double itemH = b.Bounds.Height + 6; // 6 = StackPanel Spacing
+                double itemH = b.Bounds.Height + 3; // 3 = StackPanel Spacing
                 if (pos.Y < accY + itemH / 2)
                 {
                     targetIdx = i;
@@ -679,6 +695,8 @@ public partial class MainWindow : Window
             {
                 SnippetsList.Children.RemoveAt(currentIdx);
                 SnippetsList.Children.Insert(targetIdx, border);
+                // Re-capture pointer after visual tree re-insertion (removal releases capture)
+                e.Pointer.Capture(dragHandle);
                 SyncSnippetOrder();
                 // Restore foreground on all TextBoxes after visual tree re-insertion
                 foreach (var child in SnippetsList.Children)
@@ -945,7 +963,7 @@ public partial class MainWindow : Window
 
     private void OnNewClaude(object? sender, RoutedEventArgs e)
     {
-        CreateNewChild("claude", "Claude");
+        LaunchClaudeWithInitialPrompt();
     }
 
     private void OnCloseTab(object? sender, RoutedEventArgs e)
@@ -953,19 +971,6 @@ public partial class MainWindow : Window
         if (_activeChildIndex >= 0 && _activeChildIndex < _children.Count)
         {
             CloseChild(_children[_activeChildIndex]);
-        }
-    }
-
-    private void ApplyTheme(bool isDark)
-    {
-        _isDark = isDark;
-        if (Application.Current is App app)
-        {
-            app.SetTheme(_isDark);
-        }
-        foreach (var child in _children)
-        {
-            child.Terminal.IsDarkTheme = _isDark;
         }
     }
 
@@ -1083,6 +1088,32 @@ public partial class MainWindow : Window
         }
 
         UpdateStripSelection();
+
+        // Switch project context to match the active child
+        var childFolder = _children[index].ProjectFolder;
+        if (!string.Equals(childFolder, _projectFolder, StringComparison.OrdinalIgnoreCase))
+        {
+            _projectFolder = childFolder;
+            _suppressFolderSelectionChanged = true;
+            if (!string.IsNullOrEmpty(_projectFolder))
+            {
+                var items = CmbProjectFolder.ItemsSource as List<string>;
+                if (items != null)
+                {
+                    int folderIdx = items.FindIndex(f => f.Equals(_projectFolder, StringComparison.OrdinalIgnoreCase));
+                    CmbProjectFolder.SelectedIndex = folderIdx >= 0 ? folderIdx : -1;
+                }
+            }
+            else
+            {
+                CmbProjectFolder.SelectedIndex = -1;
+            }
+            _suppressFolderSelectionChanged = false;
+
+            RefreshGitInfo();
+            RefreshSessionList();
+            RefreshFileTree();
+        }
     }
 
     private static readonly SolidColorBrush ActiveBorder = new(Color.FromRgb(0, 122, 255));   // Apple Blue
@@ -1165,7 +1196,7 @@ public partial class MainWindow : Window
             Padding = new Thickness(0, 6),
             Child = titleGrid,
             Cursor = new Cursor(StandardCursorType.Hand),
-            CornerRadius = new CornerRadius(10, 10, 0, 0)
+            CornerRadius = new CornerRadius(0)
         };
 
         // --- Container ---
@@ -1179,7 +1210,7 @@ public partial class MainWindow : Window
             Child = dockPanel,
             BorderBrush = new SolidColorBrush(Color.FromArgb(40, 255, 255, 255)),
             BorderThickness = new Thickness(0.5),
-            CornerRadius = new CornerRadius(10),
+            CornerRadius = new CornerRadius(0),
             ClipToBounds = true,
             Background = new SolidColorBrush(Color.FromRgb(28, 28, 30))  // Apple systemBackground
         };
@@ -1233,7 +1264,10 @@ public partial class MainWindow : Window
 
         var entry = new MdiChildInfo(
             container, titleBar, titleText, dot, stripDot, terminal, stripButton, stripText
-        );
+        )
+        {
+            ProjectFolder = _projectFolder
+        };
 
         // --- Events ---
         closeBtn.Click += (_, _) => CloseChild(entry);
@@ -1350,9 +1384,291 @@ public partial class MainWindow : Window
         ArrangeChildren();
     }
 
+    // ── Welcome Page ──
+
+    private Border? _welcomeContainer;
+
+    private async void ShowWelcomePage()
+    {
+        // Get recent project folders
+        var recentFolders = await SessionService.GetRecentProjectFoldersAsync();
+
+        // --- Build Welcome UI ---
+        var titleText = new TextBlock
+        {
+            Text = Loc.Get("WelcomeTitle"),
+            FontSize = 28,
+            FontWeight = FontWeight.Bold,
+            Foreground = new SolidColorBrush(Color.FromRgb(220, 220, 225)),
+            HorizontalAlignment = HorizontalAlignment.Left,
+            Margin = new Thickness(0, 0, 0, 24)
+        };
+
+        // "Start" section header
+        var startHeader = new TextBlock
+        {
+            Text = Loc.Get("Start"),
+            FontSize = 16,
+            FontWeight = FontWeight.SemiBold,
+            Foreground = new SolidColorBrush(Color.FromRgb(180, 180, 185)),
+            Margin = new Thickness(0, 0, 0, 8)
+        };
+
+        // New Project link
+        var newProjectLink = CreateWelcomeLink(
+            "M2 6C2 4.89 2.89 4 4 4H9L11 6H18C19.1 6 20 6.89 20 8V16C20 17.1 19.1 18 18 18H4C2.89 18 2 17.1 2 16V6Z",
+            Loc.Get("NewProject"),
+            Color.FromRgb(0, 122, 255));
+        newProjectLink.PointerPressed += async (_, _) =>
+        {
+            var folders = await StorageProvider.OpenFolderPickerAsync(new FolderPickerOpenOptions
+            {
+                Title = Loc.Get("SelectProjectFolder"),
+                AllowMultiple = false
+            });
+            if (folders.Count > 0)
+                OpenProjectFromWelcome(folders[0].Path.LocalPath);
+        };
+
+        // Previous Project link
+        var prevProjectLink = CreateWelcomeLink(
+            "M12 4V1L8 5L12 9V6C15.31 6 18 8.69 18 12C18 13.01 17.75 13.97 17.3 14.8L18.76 16.26C19.54 15.03 20 13.57 20 12C20 7.58 16.42 4 12 4ZM12 18C8.69 18 6 15.31 6 12C6 10.99 6.25 10.03 6.7 9.2L5.24 7.74C4.46 8.97 4 10.43 4 12C4 16.42 7.58 20 12 20V23L16 19L12 15V18Z",
+            Loc.Get("PreviousProject"),
+            Color.FromRgb(48, 209, 88));
+        if (!string.IsNullOrEmpty(_settings.ProjectFolder) && Directory.Exists(_settings.ProjectFolder))
+        {
+            prevProjectLink.PointerPressed += (_, _) => OpenProjectFromWelcome(_settings.ProjectFolder, true);
+        }
+        else
+        {
+            prevProjectLink.Opacity = 0.4;
+            prevProjectLink.Cursor = Cursor.Default;
+        }
+
+        var startSection = new StackPanel { Spacing = 4 };
+        startSection.Children.Add(startHeader);
+        startSection.Children.Add(newProjectLink);
+        startSection.Children.Add(prevProjectLink);
+
+        // "Recent" section
+        var recentHeader = new TextBlock
+        {
+            Text = Loc.Get("Recent"),
+            FontSize = 16,
+            FontWeight = FontWeight.SemiBold,
+            Foreground = new SolidColorBrush(Color.FromRgb(180, 180, 185)),
+            Margin = new Thickness(0, 20, 0, 8)
+        };
+
+        var recentSection = new StackPanel { Spacing = 2 };
+        recentSection.Children.Add(recentHeader);
+
+        var count = 0;
+        foreach (var folder in recentFolders)
+        {
+            if (count >= 10) break;
+            if (!Directory.Exists(folder)) continue;
+
+            var folderName = System.IO.Path.GetFileName(folder);
+            var folderPath = folder;
+
+            var nameText = new TextBlock
+            {
+                Text = folderName,
+                FontSize = 13,
+                Foreground = new SolidColorBrush(Color.FromRgb(75, 156, 255)),
+                VerticalAlignment = VerticalAlignment.Center
+            };
+            var pathText = new TextBlock
+            {
+                Text = folderPath,
+                FontSize = 11,
+                Foreground = new SolidColorBrush(Color.FromArgb(140, 200, 200, 205)),
+                VerticalAlignment = VerticalAlignment.Center,
+                Margin = new Thickness(10, 0, 0, 0),
+                TextTrimming = TextTrimming.CharacterEllipsis
+            };
+
+            var itemPanel = new StackPanel
+            {
+                Orientation = Orientation.Horizontal,
+                Spacing = 0
+            };
+            itemPanel.Children.Add(nameText);
+            itemPanel.Children.Add(pathText);
+
+            var itemBorder = new Border
+            {
+                Child = itemPanel,
+                Padding = new Thickness(8, 5),
+                CornerRadius = new CornerRadius(4),
+                Cursor = new Cursor(StandardCursorType.Hand),
+                Background = Brushes.Transparent
+            };
+            AttachHoverEffect(itemBorder);
+
+            var capturedPath = folder;
+            itemBorder.PointerPressed += (_, _) => OpenProjectFromWelcome(capturedPath, true);
+
+            recentSection.Children.Add(itemBorder);
+            count++;
+        }
+
+        if (count == 0)
+        {
+            recentSection.Children.Add(new TextBlock
+            {
+                Text = "No recent projects",
+                FontSize = 12,
+                Foreground = new SolidColorBrush(Color.FromArgb(100, 200, 200, 205)),
+                Margin = new Thickness(8, 4)
+            });
+        }
+
+        // Checkbox at bottom
+        var showOnStartupCheck = new CheckBox
+        {
+            Content = Loc.Get("ShowWelcomeOnStartup"),
+            IsChecked = _settings.ShowWelcomePage,
+            Foreground = new SolidColorBrush(Color.FromRgb(160, 160, 165)),
+            FontSize = 12,
+            HorizontalAlignment = HorizontalAlignment.Center,
+            Margin = new Thickness(0, 30, 0, 0)
+        };
+        showOnStartupCheck.IsCheckedChanged += (_, _) =>
+        {
+            _settings.ShowWelcomePage = showOnStartupCheck.IsChecked == true;
+            _settings.Save();
+            // Sync with settings panel checkbox
+            if (_settingsInitialized)
+            {
+                _suppressWelcomeCheckChanged = true;
+                ChkShowWelcomePage.IsChecked = _settings.ShowWelcomePage;
+                _suppressWelcomeCheckChanged = false;
+            }
+        };
+
+        // Main content layout
+        var contentPanel = new StackPanel
+        {
+            MaxWidth = 550,
+            HorizontalAlignment = HorizontalAlignment.Center,
+            VerticalAlignment = VerticalAlignment.Center,
+            Margin = new Thickness(40)
+        };
+        contentPanel.Children.Add(titleText);
+        contentPanel.Children.Add(startSection);
+        contentPanel.Children.Add(recentSection);
+        contentPanel.Children.Add(showOnStartupCheck);
+
+        var scrollViewer = new ScrollViewer
+        {
+            Content = contentPanel,
+            HorizontalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Disabled,
+            VerticalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Auto
+        };
+
+        _welcomeContainer = new Border
+        {
+            Child = scrollViewer,
+            Background = new SolidColorBrush(Color.FromRgb(30, 30, 32)),
+            ClipToBounds = true
+        };
+
+        MdiContainer.Children.Add(_welcomeContainer);
+
+        // Fill the entire MDI area
+        _welcomeContainer.SetValue(Canvas.LeftProperty, 0.0);
+        _welcomeContainer.SetValue(Canvas.TopProperty, 0.0);
+        _welcomeContainer.Width = MdiContainer.Bounds.Width;
+        _welcomeContainer.Height = MdiContainer.Bounds.Height;
+        MdiContainer.SizeChanged += WelcomePageResize;
+    }
+
+    private void WelcomePageResize(object? sender, SizeChangedEventArgs e)
+    {
+        if (_welcomeContainer != null)
+        {
+            _welcomeContainer.Width = MdiContainer.Bounds.Width;
+            _welcomeContainer.Height = MdiContainer.Bounds.Height;
+        }
+    }
+
+    private static Border CreateWelcomeLink(string iconData, string text, Color iconColor)
+    {
+        var icon = new PathIcon
+        {
+            Data = StreamGeometry.Parse(iconData),
+            Width = 16,
+            Height = 16,
+            Foreground = new SolidColorBrush(iconColor)
+        };
+        var label = new TextBlock
+        {
+            Text = text,
+            FontSize = 14,
+            Foreground = new SolidColorBrush(Color.FromRgb(75, 156, 255)),
+            VerticalAlignment = VerticalAlignment.Center
+        };
+        var panel = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            Spacing = 10
+        };
+        panel.Children.Add(icon);
+        panel.Children.Add(label);
+
+        var border = new Border
+        {
+            Child = panel,
+            Padding = new Thickness(8, 6),
+            CornerRadius = new CornerRadius(4),
+            Cursor = new Cursor(StandardCursorType.Hand),
+            Background = Brushes.Transparent
+        };
+        AttachHoverEffect(border);
+
+        return border;
+    }
+
+    private void OpenProjectFromWelcome(string folderPath, bool continueSession = false)
+    {
+        CloseWelcomePage();
+        SetProjectFolder(folderPath);
+        LoadRecentProjectFolders();
+        if (continueSession)
+            CreateNewChild("claude -c", "Claude");
+        else
+            LaunchClaudeWithInitialPrompt();
+    }
+
+    private static void AttachHoverEffect(Border border)
+    {
+        border.PointerEntered += (s, _) => ((Border)s!).Background = new SolidColorBrush(Color.FromArgb(30, 255, 255, 255));
+        border.PointerExited += (s, _) => ((Border)s!).Background = Brushes.Transparent;
+    }
+
+    private void CloseWelcomePage()
+    {
+        if (_welcomeContainer != null)
+        {
+            MdiContainer.Children.Remove(_welcomeContainer);
+            MdiContainer.SizeChanged -= WelcomePageResize;
+            _welcomeContainer = null;
+        }
+    }
+
+    private void LaunchClaudeWithInitialPrompt()
+    {
+        var prompt = _settings.InitialPrompt.Trim();
+        var cmd = string.IsNullOrEmpty(prompt) ? "claude" : $"claude {prompt}";
+        CreateNewChild(cmd, "Claude");
+    }
+
     protected override void OnClosed(EventArgs e)
     {
         base.OnClosed(e);
+        CloseWelcomePage();
         _settings.ProjectFolder = _projectFolder ?? "";
         _settings.Save();
         _snippetStore.Save();

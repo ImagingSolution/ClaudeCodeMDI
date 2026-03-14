@@ -11,6 +11,8 @@ public class AppSettings
     public double FontSize { get; set; } = 14;
     public bool IsDark { get; set; } = true;
     public string Language { get; set; } = "English";
+    public string InitialPrompt { get; set; } = "";
+    public bool ShowWelcomePage { get; set; } = true;
 
     private static readonly string SettingsDir = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
