@@ -7,27 +7,29 @@ Manage multiple Claude Code sessions side-by-side in a dark-themed interface wit
 ## Features
 
 - **Welcome Page** - VS Code-style startup page with new project, previous project, and recent projects list. Previous/recent projects automatically resume with `claude -c`
-- **MDI Terminal Windows** - Open multiple Claude Code sessions in resizable, draggable child windows with Maximize / Tile / Cascade layouts
+- **MDI Terminal Windows** - Open multiple Claude Code sessions in resizable, draggable child windows with Tile / Cascade / Full view layouts
 - **Session Management** - Resume previous Claude Code sessions with history and timestamps
 - **Project Context Switching** - Automatically switch project folder, explorer, and sessions when switching between MDI windows
-- **Project Explorer** - Browse project file trees with syntax-aware icons and color-coded file types
-- **Snippets Panel** - Store and quickly send code snippets to the active console (`\r` in text sends Enter key)
-- **Usage Tracking** - Monitor daily Claude API usage (messages, tool calls, sessions) with a chart view
-- **Mode Switch** - Switch Claude Code mode (Shift+Tab) from the toolbar
-- **Compact** - Send /compact command from the toolbar
+- **Project Explorer** - Browse project file trees with syntax-aware icons and color-coded file types (40+ file extensions). Auto-refreshes on file system changes
+- **Snippets Panel** - Store and quickly send code snippets to the active console (`\r` in text sends Enter key). Drag-and-drop reordering supported
+- **Usage Tracking** - Monitor daily Claude API usage (messages, tool calls, sessions) with a 14-day chart view
+- **Mode Switch** - Switch Claude Code mode (Shift+Tab) from the activity bar
+- **Compact** - Send /compact command from the activity bar
+- **Settings Panel** - Configure font family, font size, language, and initial prompt from the side panel
 - **Initial Prompt** - Configurable initial prompt for new Claude sessions
+- **Open .claude Folder** - Quick access to the `.claude` configuration folder from settings
 - **Shift+Enter Line Break** - Insert a newline without submitting, enabling multi-line input
 - **File Drag & Drop** - Drop files onto the terminal to insert their paths (same as Claude Code CLI)
 - **Clipboard Image Paste** - Ctrl+V pastes clipboard images as temp file paths for Claude Code
 - **Localization** - English and Japanese (日本語) support
-- **Git Integration** - Display repository name and branch in the status bar
+- **Git Integration** - Display repository name and branch in the status bar. Double-click repo name to open in browser
 
 ## Tech Stack
 
 | Component | Technology |
 |---|---|
 | Framework | .NET 8.0 / C# |
-| UI | Avalonia 11.3 + Fluent Theme |
+| UI | Avalonia 11.3.12 + Fluent Theme |
 | Terminal | Custom VT100/ANSI parser with PseudoConsole (ConPTY) |
 | Serialization | System.Text.Json |
 
@@ -35,22 +37,28 @@ Manage multiple Claude Code sessions side-by-side in a dark-themed interface wit
 
 ```
 ClaudeCodeMDI/
-├── MainWindow.axaml / .cs        # Main MDI window and UI logic
-├── App.axaml / .cs               # Application root and theme management
+├── MainWindow.axaml / .cs          # Main MDI window and UI logic
+├── App.axaml / .cs                 # Application root and theme management
+├── Program.cs                      # Application entry point
 ├── Terminal/
-│   ├── TerminalControl.cs        # Custom terminal rendering control
-│   ├── TerminalBuffer.cs         # Cell grid and scrollback buffer
-│   ├── TerminalCell.cs           # Cell data model (character, colors, attributes)
-│   ├── VtParser.cs               # ANSI/VT escape sequence parser
-│   └── PseudoConsole.cs          # Windows PTY interface
+│   ├── TerminalControl.cs          # Custom terminal rendering control
+│   ├── TerminalBuffer.cs           # Cell grid and scrollback buffer
+│   ├── TerminalCell.cs             # Cell data model (character, colors, attributes)
+│   ├── VtParser.cs                 # ANSI/VT escape sequence parser
+│   └── PseudoConsole.cs            # Windows PTY interface
 ├── Services/
-│   ├── Localization.cs           # EN/JP string localization
-│   ├── AppSettings.cs            # Configuration persistence
-│   ├── SessionService.cs         # Claude session management
-│   ├── SnippetStore.cs           # Snippet storage
-│   └── UsageTracker.cs           # API usage monitoring
-├── UsageChartWindow.axaml / .cs  # Usage chart dialog
-└── FileTreeNode.cs               # File explorer tree node model
+│   ├── Localization.cs             # EN/JP string localization
+│   ├── AppSettings.cs              # Configuration persistence
+│   ├── SessionService.cs           # Claude session management
+│   ├── SnippetStore.cs             # Snippet storage
+│   └── UsageTracker.cs             # API usage monitoring
+├── UsageChartWindow.axaml / .cs    # Usage chart dialog
+├── SettingsWindow.axaml / .cs      # Settings dialog window
+├── SessionListWindow.axaml / .cs   # Session list window
+├── FileTreeNode.cs                 # File explorer tree node model
+├── icon.ico / icon.png             # Application icon
+├── app.manifest                    # Application manifest
+└── build.number                    # Auto-incrementing build number
 ```
 
 ## Requirements
@@ -95,27 +103,29 @@ Avalonia UI で構築された、[Claude Code](https://docs.anthropic.com/en/doc
 ## 機能
 
 - **ウェルカムページ** - VS Code 風の起動画面。新規プロジェクト、前回のプロジェクト、最近使用したプロジェクト一覧を表示。前回/最近のプロジェクトは `claude -c` で自動継続
-- **MDI ターミナルウィンドウ** - 複数の Claude Code セッションを、リサイズ・ドラッグ可能な子ウィンドウで表示。最大化 / タイル / カスケード配置に対応
+- **MDI ターミナルウィンドウ** - 複数の Claude Code セッションを、リサイズ・ドラッグ可能な子ウィンドウで表示。タイル / カスケード / 最大表示に対応
 - **セッション管理** - 過去の Claude Code セッションを履歴とタイムスタンプ付きで再開
 - **プロジェクトコンテキスト切替** - MDI ウィンドウの切り替え時に、プロジェクトフォルダ・エクスプローラー・セッション一覧を自動切替
-- **プロジェクトエクスプローラー** - ファイルツリーを構文対応のアイコンと色分けで表示
-- **スニペットパネル** - コードスニペットを保存し、アクティブなコンソールにワンクリックで送信（テキスト中の `\r` で Enter キーを送信）
-- **使用量トラッキング** - Claude API の日次使用量（メッセージ数、ツールコール数、セッション数）をチャートで表示
-- **モード切替** - ツールバーから Claude Code のモードを切替（Shift+Tab）
-- **コンパクト** - ツールバーから /compact コマンドを送信
+- **プロジェクトエクスプローラー** - ファイルツリーを構文対応のアイコンと色分けで表示（40種類以上のファイル拡張子対応）。ファイルシステム変更時に自動リフレッシュ
+- **スニペットパネル** - コードスニペットを保存し、アクティブなコンソールにワンクリックで送信（テキスト中の `\r` で Enter キーを送信）。ドラッグ＆ドロップによる並べ替えに対応
+- **使用量トラッキング** - Claude API の日次使用量（メッセージ数、ツールコール数、セッション数）を14日間のチャートで表示
+- **モード切替** - アクティビティバーから Claude Code のモードを切替（Shift+Tab）
+- **コンパクト** - アクティビティバーから /compact コマンドを送信
+- **設定パネル** - サイドパネルからフォント、フォントサイズ、言語、初期プロンプトを設定
 - **初期プロンプト** - 新規 Claude セッション起動時のプロンプトを設定可能
+- **.claude フォルダを開く** - 設定から `.claude` 設定フォルダへのクイックアクセス
 - **Shift+Enter 改行** - 送信せずに改行を挿入し、複数行の入力が可能
 - **ファイルドラッグ＆ドロップ** - ターミナルにファイルをドロップしてパスを入力（Claude Code CLI と同じ動作）
 - **クリップボード画像貼り付け** - Ctrl+V でクリップボード内の画像を一時ファイルとして貼り付け
-- **多言語対応** - 英語・日本語（日本語）に対応
-- **Git 連携** - ステータスバーにリポジトリ名とブランチ名を表示
+- **多言語対応** - 英語・日本語に対応
+- **Git 連携** - ステータスバーにリポジトリ名とブランチ名を表示。リポジトリ名ダブルクリックでブラウザで開く
 
 ## 技術スタック
 
 | コンポーネント | 技術 |
 |---|---|
 | フレームワーク | .NET 8.0 / C# |
-| UI | Avalonia 11.3 + Fluent テーマ |
+| UI | Avalonia 11.3.12 + Fluent テーマ |
 | ターミナル | カスタム VT100/ANSI パーサー + PseudoConsole (ConPTY) |
 | シリアライズ | System.Text.Json |
 
