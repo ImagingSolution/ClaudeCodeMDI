@@ -7,7 +7,9 @@ namespace ClaudeCodeMDI.Terminal;
 public class TerminalBuffer
 {
     private TerminalCell[,] _cells;
+    private bool[] _lineWrapped;
     private readonly List<TerminalCell[]> _scrollback = new();
+    private readonly List<bool> _scrollbackWrapped = new();
     private readonly int _maxScrollback;
 
     public int Rows { get; private set; }
@@ -15,6 +17,7 @@ public class TerminalBuffer
     public int CursorRow { get; set; }
     public int CursorCol { get; set; }
     public bool CursorVisible { get; set; } = true;
+    public bool BracketedPasteMode { get; set; }
 
     // Current SGR attributes
     public int CurrentFg { get; set; } = -1;
@@ -46,6 +49,7 @@ public class TerminalBuffer
         Cols = cols;
         _maxScrollback = maxScrollback;
         _cells = new TerminalCell[rows, cols];
+        _lineWrapped = new bool[rows];
         ClearAll();
         ScrollTop = 0;
         ScrollBottom = rows - 1;
@@ -65,6 +69,20 @@ public class TerminalBuffer
         return null;
     }
 
+    public bool IsLineWrapped(int row)
+    {
+        if (row >= 0 && row < _lineWrapped.Length)
+            return _lineWrapped[row];
+        return false;
+    }
+
+    public bool IsScrollbackLineWrapped(int index)
+    {
+        if (index >= 0 && index < _scrollbackWrapped.Count)
+            return _scrollbackWrapped[index];
+        return false;
+    }
+
     public void SetCell(int row, int col, TerminalCell cell)
     {
         if (row >= 0 && row < Rows && col >= 0 && col < Cols)
@@ -80,11 +98,13 @@ public class TerminalBuffer
             // Not enough room for a 2-cell char on this line; wrap
             if (CursorCol < Cols)
                 _cells[CursorRow, CursorCol] = TerminalCell.Empty;
+            _lineWrapped[CursorRow] = true;
             CursorCol = 0;
             LineFeed();
         }
         else if (CursorCol >= Cols)
         {
+            _lineWrapped[CursorRow] = true;
             CursorCol = 0;
             LineFeed();
         }
@@ -93,6 +113,12 @@ public class TerminalBuffer
         if (CursorCol > 0 && _cells[CursorRow, CursorCol].Attributes.HasFlag(CellAttributes.WideCharTrail))
         {
             _cells[CursorRow, CursorCol - 1] = TerminalCell.Empty;
+        }
+
+        // If we're overwriting a wide-char lead, clear the orphaned trail cell
+        if (CursorCol + 1 < Cols && _cells[CursorRow, CursorCol + 1].Attributes.HasFlag(CellAttributes.WideCharTrail))
+        {
+            _cells[CursorRow, CursorCol + 1] = TerminalCell.Empty;
         }
 
         _cells[CursorRow, CursorCol] = new TerminalCell
@@ -106,6 +132,12 @@ public class TerminalBuffer
 
         if (wide && CursorCol < Cols)
         {
+            // If trail position overwrites a wide-char lead, clear its orphaned trail
+            if (CursorCol + 1 < Cols && _cells[CursorRow, CursorCol + 1].Attributes.HasFlag(CellAttributes.WideCharTrail))
+            {
+                _cells[CursorRow, CursorCol + 1] = TerminalCell.Empty;
+            }
+
             // Write trail marker in the next cell
             _cells[CursorRow, CursorCol] = new TerminalCell
             {
@@ -207,8 +239,12 @@ public class TerminalBuffer
                 for (int c = 0; c < Cols; c++)
                     line[c] = _cells[ScrollTop, c];
                 _scrollback.Add(line);
+                _scrollbackWrapped.Add(_lineWrapped[ScrollTop]);
                 if (_scrollback.Count > _maxScrollback)
+                {
                     _scrollback.RemoveAt(0);
+                    _scrollbackWrapped.RemoveAt(0);
+                }
             }
 
             // Shift lines up within scroll region
@@ -216,10 +252,12 @@ public class TerminalBuffer
             {
                 for (int c = 0; c < Cols; c++)
                     _cells[r, c] = _cells[r + 1, c];
+                _lineWrapped[r] = _lineWrapped[r + 1];
             }
 
             // Clear bottom line
             ClearLine(ScrollBottom);
+            _lineWrapped[ScrollBottom] = false;
         }
     }
 
@@ -231,8 +269,10 @@ public class TerminalBuffer
             {
                 for (int c = 0; c < Cols; c++)
                     _cells[r, c] = _cells[r - 1, c];
+                _lineWrapped[r] = _lineWrapped[r - 1];
             }
             ClearLine(ScrollTop);
+            _lineWrapped[ScrollTop] = false;
         }
     }
 
@@ -240,6 +280,8 @@ public class TerminalBuffer
     {
         for (int c = 0; c < Cols; c++)
             _cells[row, c] = TerminalCell.Empty;
+        if (row >= 0 && row < _lineWrapped.Length)
+            _lineWrapped[row] = false;
     }
 
     public void ClearAll()
@@ -266,7 +308,7 @@ public class TerminalBuffer
             case 2: // entire display
             case 3: // entire display + scrollback
                 ClearAll();
-                if (mode == 3) _scrollback.Clear();
+                if (mode == 3) { _scrollback.Clear(); _scrollbackWrapped.Clear(); }
                 break;
         }
     }
@@ -278,6 +320,7 @@ public class TerminalBuffer
             case 0: // cursor to end
                 for (int c = CursorCol; c < Cols; c++)
                     _cells[CursorRow, c] = TerminalCell.Empty;
+                _lineWrapped[CursorRow] = false;
                 break;
             case 1: // start to cursor
                 for (int c = 0; c <= CursorCol && c < Cols; c++)
@@ -294,8 +337,11 @@ public class TerminalBuffer
         for (int i = 0; i < count; i++)
         {
             for (int r = ScrollBottom; r > CursorRow; r--)
+            {
                 for (int c = 0; c < Cols; c++)
                     _cells[r, c] = _cells[r - 1, c];
+                _lineWrapped[r] = _lineWrapped[r - 1];
+            }
             ClearLine(CursorRow);
         }
     }
@@ -305,30 +351,59 @@ public class TerminalBuffer
         for (int i = 0; i < count; i++)
         {
             for (int r = CursorRow; r < ScrollBottom; r++)
+            {
                 for (int c = 0; c < Cols; c++)
                     _cells[r, c] = _cells[r + 1, c];
+                _lineWrapped[r] = _lineWrapped[r + 1];
+            }
             ClearLine(ScrollBottom);
         }
     }
 
     public void DeleteChars(int count)
     {
-        for (int i = 0; i < count; i++)
+        int start = CursorCol;
+
+        // If cursor is on a wide-char trail, include the lead cell
+        if (start > 0 && _cells[CursorRow, start].Attributes.HasFlag(CellAttributes.WideCharTrail))
+            start--;
+
+        // Expand count to cover any wide-char pair split at the boundary
+        int end = Math.Min(start + count, Cols);
+        if (end < Cols && _cells[CursorRow, end].Attributes.HasFlag(CellAttributes.WideCharTrail))
+            end++;
+
+        int deleteLen = end - start;
+
+        // Shift cells left
+        for (int c = start; c < Cols; c++)
         {
-            for (int c = CursorCol; c < Cols - 1; c++)
-                _cells[CursorRow, c] = _cells[CursorRow, c + 1];
-            _cells[CursorRow, Cols - 1] = TerminalCell.Empty;
+            _cells[CursorRow, c] = (c + deleteLen < Cols)
+                ? _cells[CursorRow, c + deleteLen]
+                : TerminalCell.Empty;
         }
     }
 
     public void InsertChars(int count)
     {
-        for (int i = 0; i < count; i++)
-        {
-            for (int c = Cols - 1; c > CursorCol; c--)
-                _cells[CursorRow, c] = _cells[CursorRow, c - 1];
-            _cells[CursorRow, CursorCol] = TerminalCell.Empty;
-        }
+        int start = CursorCol;
+
+        // If cursor is on a wide-char trail, include the lead cell
+        if (start > 0 && _cells[CursorRow, start].Attributes.HasFlag(CellAttributes.WideCharTrail))
+            start--;
+
+        // Shift cells right
+        for (int c = Cols - 1; c >= start + count; c--)
+            _cells[CursorRow, c] = _cells[CursorRow, c - count];
+
+        // Clear inserted area
+        for (int c = start; c < Math.Min(start + count, Cols); c++)
+            _cells[CursorRow, c] = TerminalCell.Empty;
+
+        // If a wide-char pair was split at the right edge, clear the orphaned lead
+        int boundary = start + count;
+        if (boundary < Cols && _cells[CursorRow, boundary].Attributes.HasFlag(CellAttributes.WideCharTrail))
+            _cells[CursorRow, boundary] = TerminalCell.Empty;
     }
 
     public void EraseChars(int count)
@@ -397,6 +472,11 @@ public class TerminalBuffer
         for (int r = copyRows; r < newRows; r++)
             for (int c = 0; c < newCols; c++)
                 newCells[r, c] = TerminalCell.Empty;
+
+        var newWrapped = new bool[newRows];
+        for (int r = 0; r < Math.Min(_lineWrapped.Length, newRows); r++)
+            newWrapped[r] = _lineWrapped[r];
+        _lineWrapped = newWrapped;
 
         _cells = newCells;
         Rows = newRows;

@@ -215,13 +215,38 @@ public class PseudoConsole : IDisposable
 
     public void WriteInput(byte[] data)
     {
-        try
+        if (_writer == null || data.Length == 0) return;
+
+        const int chunkSize = 512;
+        if (data.Length <= chunkSize)
         {
-            _writer?.Write(data, 0, data.Length);
-            _writer?.Flush();
+            try
+            {
+                _writer.Write(data, 0, data.Length);
+                _writer.Flush();
+            }
+            catch (IOException) { }
+            catch (ObjectDisposedException) { }
+            return;
         }
-        catch (IOException) { }
-        catch (ObjectDisposedException) { }
+
+        // Large data: write in chunks on a background thread to avoid blocking UI
+        var writer = _writer;
+        Task.Run(async () =>
+        {
+            try
+            {
+                for (int offset = 0; offset < data.Length; offset += chunkSize)
+                {
+                    int len = Math.Min(chunkSize, data.Length - offset);
+                    writer.Write(data, offset, len);
+                    writer.Flush();
+                    await Task.Delay(5);
+                }
+            }
+            catch (IOException) { }
+            catch (ObjectDisposedException) { }
+        });
     }
 
     public void WriteInput(string text)
@@ -235,6 +260,16 @@ public class PseudoConsole : IDisposable
         {
             ResizePseudoConsole(_hPC, new COORD { X = (short)cols, Y = (short)rows });
         }
+    }
+
+    public bool IsRunning =>
+        _processHandle != null && !_processHandle.IsInvalid && !_disposed
+        && WaitForSingleObject(_processHandle, 0) != 0; // WAIT_OBJECT_0 = 0
+
+    public bool WaitForExitTimeout(int milliseconds)
+    {
+        if (_processHandle == null || _processHandle.IsInvalid) return true;
+        return WaitForSingleObject(_processHandle, (uint)milliseconds) == 0;
     }
 
     public void Kill()

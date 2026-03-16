@@ -43,6 +43,7 @@ public static class Loc
         ["OpenWith"] = new() { ["English"] = "Open with...", ["日本語"] = "プログラムから開く..." },
         ["ShowInExplorer"] = new() { ["English"] = "Show in Explorer", ["日本語"] = "エクスプローラーで表示" },
         ["CopyPath"] = new() { ["English"] = "Copy Path", ["日本語"] = "パスをコピー" },
+        ["CopyFilename"] = new() { ["English"] = "Copy Filename", ["日本語"] = "ファイル名をコピー" },
 
         // ── Settings Panel ──
         ["ConsoleSettings"] = new() { ["English"] = "Console Settings", ["日本語"] = "コンソール設定" },
@@ -80,6 +81,13 @@ public static class Loc
         ["Recent"] = new() { ["English"] = "Recent", ["日本語"] = "最近" },
         ["ShowWelcomeOnStartup"] = new() { ["English"] = "Show Welcome Page on Startup", ["日本語"] = "起動時にウェルカムページを表示" },
         ["ShowWelcomePage"] = new() { ["English"] = "Show Welcome Page", ["日本語"] = "ウェルカムページを表示" },
+
+        // ── Tab Context Menu ──
+        ["Close"] = new() { ["English"] = "Close", ["日本語"] = "閉じる" },
+        ["CloseOthers"] = new() { ["English"] = "Close Others", ["日本語"] = "他を閉じる" },
+        ["CloseToRight"] = new() { ["English"] = "Close to the Right", ["日本語"] = "右側を閉じる" },
+        ["Duplicate"] = new() { ["English"] = "Duplicate", ["日本語"] = "複製" },
+        ["ExportOutput"] = new() { ["English"] = "Export Output...", ["日本語"] = "出力をエクスポート..." },
     };
 
     public static string Get(string key)

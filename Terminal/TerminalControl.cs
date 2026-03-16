@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Threading.Tasks;
@@ -31,6 +32,11 @@ public class TerminalControl : Control, IDisposable
     private int _selStartRow, _selStartCol;
     private int _selEndRow, _selEndCol;
 
+    // Input boundary tracking: records where editable input begins
+    private bool _inputStartPending = true;
+    private int _inputStartAbsRow;
+    private int _inputStartCol;
+
     // Scrollbar drag state
     private bool _isScrollbarDragging;
     private double _scrollbarDragStartY;
@@ -43,10 +49,20 @@ public class TerminalControl : Control, IDisposable
     private const double InputBoxHeight = 28;
     private const double InputBoxMargin = 2;
 
+    // Search bar state
+    private Border? _searchBar;
+    private TextBox? _searchTextBox;
+    private TextBlock? _searchCountLabel;
+    private bool _searchVisible;
+    private string _searchTerm = "";
+    private readonly List<(int absRow, int col, int length)> _searchMatches = new();
+    private int _searchCurrentIndex = -1;
+
     public string TabTitle { get; private set; } = "Console";
     public event Action<string>? TitleChanged;
     public event Action? Exited;
     public event Action? Clicked;
+    public event Action<double>? FontSizeChanged;
 
     public bool IsDarkTheme
     {
@@ -115,6 +131,9 @@ public class TerminalControl : Control, IDisposable
         VisualChildren.Add(_inputTextBox);
         LogicalChildren.Add(_inputTextBox);
 
+        // Build search bar
+        BuildSearchBar();
+
         // Enable file drag & drop
         DragDrop.SetAllowDrop(this, true);
         AddHandler(DragDrop.DropEvent, OnFileDrop);
@@ -159,6 +178,15 @@ public class TerminalControl : Control, IDisposable
         return; // All control characters — ignore
     hasPrintable:
 
+        // Track input start on first text input after prompt
+        if (_inputStartPending)
+        {
+            _inputStartAbsRow = ScreenRowToAbsolute(_buffer.CursorRow);
+            _inputStartCol = _buffer.CursorCol;
+            _inputStartPending = false;
+            System.Diagnostics.Debug.WriteLine($"[InputStart] recorded at ({_inputStartAbsRow},{_inputStartCol})");
+        }
+
         // Printable text committed (half-width direct or IME confirmed) — send to PTY
         if (_hasSelection) ClearSelection();
         _pty?.WriteInput(e.Text);
@@ -192,6 +220,15 @@ public class TerminalControl : Control, IDisposable
             return;
         }
 
+        // Track input start: record cursor position on first interaction after prompt
+        if (_inputStartPending)
+        {
+            _inputStartAbsRow = ScreenRowToAbsolute(_buffer.CursorRow);
+            _inputStartCol = _buffer.CursorCol;
+            _inputStartPending = false;
+            System.Diagnostics.Debug.WriteLine($"[InputStart] recorded at ({_inputStartAbsRow},{_inputStartCol})");
+        }
+
         // Ctrl+C: copy selection or send SIGINT
         if (e.Key == Key.C && e.KeyModifiers.HasFlag(KeyModifiers.Control))
         {
@@ -205,8 +242,26 @@ public class TerminalControl : Control, IDisposable
             }
             else
             {
+                _inputStartPending = true;
                 _pty?.WriteInput("\x03");
             }
+            e.Handled = true;
+            return;
+        }
+
+        // Ctrl+F: toggle search bar
+        if (e.Key == Key.F && e.KeyModifiers.HasFlag(KeyModifiers.Control))
+        {
+            if (_searchVisible) HideSearchBar(); else ShowSearchBar();
+            e.Handled = true;
+            return;
+        }
+
+        // Ctrl+0: reset font size to default
+        if (e.Key == Key.D0 && e.KeyModifiers.HasFlag(KeyModifiers.Control))
+        {
+            SetFont(_typeface.FontFamily.Name, 14);
+            FontSizeChanged?.Invoke(14);
             e.Handled = true;
             return;
         }
@@ -230,6 +285,7 @@ public class TerminalControl : Control, IDisposable
         // Enter: send carriage return to PTY (submit)
         if (e.Key == Key.Enter)
         {
+            _inputStartPending = true;
             _pty?.WriteInput("\r");
             e.Handled = true;
             return;
@@ -239,6 +295,14 @@ public class TerminalControl : Control, IDisposable
         if (e.Key == Key.Escape)
         {
             _pty?.WriteInput("\x1b");
+            e.Handled = true;
+            return;
+        }
+
+        // Backspace / Delete with selection: delete all selected characters
+        if (_hasSelection && (e.Key == Key.Back || e.Key == Key.Delete))
+        {
+            DeleteSelectedChars();
             e.Handled = true;
             return;
         }
@@ -355,7 +419,12 @@ public class TerminalControl : Control, IDisposable
         // Fallback: paste text
         var text = await clipboard.GetTextAsync();
         if (!string.IsNullOrEmpty(text))
-            _pty?.WriteInput(text);
+        {
+            if (_buffer.BracketedPasteMode)
+                _pty?.WriteInput("\x1b[200~" + text + "\x1b[201~");
+            else
+                _pty?.WriteInput(text);
+        }
     }
 
     private static string? SaveClipboardImage(byte[] imageData)
@@ -441,6 +510,7 @@ public class TerminalControl : Control, IDisposable
     protected override Size MeasureOverride(Size availableSize)
     {
         _inputTextBox.Measure(new Size(availableSize.Width, InputBoxHeight));
+        _searchBar?.Measure(availableSize);
         return availableSize;
     }
 
@@ -449,6 +519,12 @@ public class TerminalControl : Control, IDisposable
         // Position TextBox at the bottom of the control
         double tbY = finalSize.Height - InputBoxHeight;
         _inputTextBox.Arrange(new Rect(0, tbY, finalSize.Width, InputBoxHeight));
+        // Position search bar at top-right
+        if (_searchBar != null && _searchVisible)
+        {
+            double sbW = Math.Min(_searchBar.DesiredSize.Width, finalSize.Width);
+            _searchBar.Arrange(new Rect(finalSize.Width - sbW, 0, sbW, _searchBar.DesiredSize.Height));
+        }
         return finalSize;
     }
 
@@ -642,21 +718,9 @@ public class TerminalControl : Control, IDisposable
         {
             int colStart = (absRow == sr) ? sc : 0;
             int colEnd = (absRow == er) ? ec : _buffer.Cols - 1;
-            int scrollbackCount = _buffer.Scrollback.Count;
             for (int col = colStart; col <= colEnd && col < _buffer.Cols; col++)
             {
-                TerminalCell cell;
-                if (absRow < scrollbackCount)
-                {
-                    var line = _buffer.GetScrollbackLine(absRow);
-                    cell = (line != null && col < line.Length) ? line[col] : TerminalCell.Empty;
-                }
-                else
-                {
-                    int bufRow = absRow - scrollbackCount;
-                    cell = (bufRow >= 0 && bufRow < _buffer.Rows)
-                        ? _buffer.GetCell(bufRow, col) : TerminalCell.Empty;
-                }
+                var cell = GetCellAtAbs(absRow, col);
                 // Skip wide-char trail cells (their content is '\0')
                 if (cell.Attributes.HasFlag(CellAttributes.WideCharTrail))
                     continue;
@@ -664,10 +728,23 @@ public class TerminalControl : Control, IDisposable
             }
             if (absRow < er)
             {
-                int len = sb.Length;
-                while (len > 0 && sb[len - 1] == ' ') len--;
-                sb.Length = len;
-                sb.AppendLine();
+                // Use buffer's line-wrap tracking for accurate detection
+                int sbCount = _buffer.Scrollback.Count;
+                bool isWrapped;
+                if (absRow < sbCount)
+                    isWrapped = _buffer.IsScrollbackLineWrapped(absRow);
+                else
+                    isWrapped = _buffer.IsLineWrapped(absRow - sbCount);
+
+                if (!isWrapped)
+                {
+                    // Real line break: trim trailing spaces and add newline
+                    int len = sb.Length;
+                    while (len > 0 && sb[len - 1] == ' ') len--;
+                    sb.Length = len;
+                    sb.AppendLine();
+                }
+                // Wrapped: text continues directly on next row (no trim, no newline)
             }
         }
         return sb.ToString().TrimEnd();
@@ -680,9 +757,401 @@ public class TerminalControl : Control, IDisposable
         InvalidateVisual();
     }
 
+    private TerminalCell GetCellAtAbs(int absRow, int col)
+    {
+        int scrollbackCount = _buffer.Scrollback.Count;
+        if (absRow < scrollbackCount)
+        {
+            var line = _buffer.GetScrollbackLine(absRow);
+            return (line != null && col < line.Length) ? line[col] : TerminalCell.Empty;
+        }
+        int bufRow = absRow - scrollbackCount;
+        return (bufRow >= 0 && bufRow < _buffer.Rows && col >= 0 && col < _buffer.Cols)
+            ? _buffer.GetCell(bufRow, col) : TerminalCell.Empty;
+    }
+
+    private int CountCharsInRange(int fromRow, int fromCol, int toRow, int toCol)
+    {
+        int count = 0;
+        for (int row = fromRow; row <= toRow; row++)
+        {
+            int colStart = (row == fromRow) ? fromCol : 0;
+            int colEnd = (row == toRow) ? toCol : _buffer.Cols - 1;
+            for (int col = colStart; col <= colEnd; col++)
+            {
+                var cell = GetCellAtAbs(row, col);
+                if (cell.Character != '\0' && !cell.Attributes.HasFlag(CellAttributes.WideCharTrail))
+                    count++;
+            }
+        }
+        return count;
+    }
+
+
+    private void DeleteSelectedChars()
+    {
+        GetOrderedSelection(out int sr, out int sc, out int er, out int ec);
+        int scrollbackCount = _buffer.Scrollback.Count;
+        int cursorAbsRow = ScreenRowToAbsolute(_buffer.CursorRow);
+        int cursorCol = _buffer.CursorCol;
+
+        System.Diagnostics.Debug.WriteLine($"[DeleteSelectedChars] sel=({sr},{sc})-({er},{ec}) cursorAbsRow={cursorAbsRow} cursorCol={cursorCol}");
+
+        // Multi-row or off-cursor-row: send charCount backspaces from cursor position
+        // (can't reliably move cursor to selection, but delete matching number of chars)
+        if (sr != er || sr != cursorAbsRow)
+        {
+            int multiCharCount = CountCharsInRange(sr, sc, er, ec);
+            ClearSelection();
+            if (multiCharCount <= 0) multiCharCount = 1;
+            System.Diagnostics.Debug.WriteLine($"[DeleteSelectedChars] multi-row/off-cursor: sending {multiCharCount} backspaces");
+            var bsSeq = new System.Text.StringBuilder();
+            for (int i = 0; i < multiCharCount; i++)
+                bsSeq.Append('\x7f');
+            _pty?.WriteInput(bsSeq.ToString());
+            return;
+        }
+
+        int bufRow = cursorAbsRow - scrollbackCount;
+        if (bufRow < 0 || bufRow >= _buffer.Rows)
+        {
+            ClearSelection();
+            _pty?.WriteInput("\x7f");
+            return;
+        }
+
+        // Find last non-empty cell in selection to avoid counting trailing empty cells
+        int lastContent = sc - 1;
+        for (int col = ec; col >= sc; col--)
+        {
+            if (_buffer.GetCell(bufRow, col).Character != '\0')
+            {
+                lastContent = col;
+                break;
+            }
+        }
+
+        ClearSelection();
+
+        // If selection has no content, fall back to single backspace
+        if (lastContent < sc)
+        {
+            _pty?.WriteInput("\x7f");
+            return;
+        }
+
+        int effectiveEnd = Math.Min(ec, lastContent);
+        int charCount = 0;
+        for (int col = sc; col <= effectiveEnd; col++)
+        {
+            var cell = _buffer.GetCell(bufRow, col);
+            if (!cell.Attributes.HasFlag(CellAttributes.WideCharTrail))
+                charCount++;
+        }
+
+        if (charCount <= 0)
+        {
+            _pty?.WriteInput("\x7f");
+            return;
+        }
+
+        int targetCol = effectiveEnd + 1;
+
+        System.Diagnostics.Debug.WriteLine($"[DeleteSelectedChars] charCount={charCount} cursorCol={cursorCol} targetCol={targetCol}");
+
+        // Move cursor to end of selection, then send backspaces
+        var sb = new System.Text.StringBuilder();
+        if (cursorCol != targetCol)
+        {
+            int moveCount = CountCharsBetweenCols(bufRow, cursorCol, targetCol);
+            if (moveCount > 0)
+                for (int i = 0; i < moveCount; i++) sb.Append("\x1b[C");
+            else if (moveCount < 0)
+                for (int i = 0; i < -moveCount; i++) sb.Append("\x1b[D");
+        }
+        for (int i = 0; i < charCount; i++)
+            sb.Append('\x7f');
+
+        _pty?.WriteInput(sb.ToString());
+    }
+
+    private int CountCharsBetweenCols(int row, int fromCol, int toCol)
+    {
+        if (fromCol == toCol) return 0;
+        int startCol = Math.Min(fromCol, toCol);
+        int endCol = Math.Max(fromCol, toCol);
+        int count = 0;
+        for (int col = startCol; col < endCol && col < _buffer.Cols; col++)
+        {
+            if (!_buffer.GetCell(row, col).Attributes.HasFlag(CellAttributes.WideCharTrail))
+                count++;
+        }
+        return toCol > fromCol ? count : -count;
+    }
+
+    // ── Search Bar ──
+
+    private void BuildSearchBar()
+    {
+        _searchTextBox = new TextBox
+        {
+            Watermark = "Search...",
+            FontSize = 12,
+            MinWidth = 180,
+            Padding = new Thickness(6, 3),
+            Background = new SolidColorBrush(Color.FromRgb(50, 50, 52)),
+            Foreground = new SolidColorBrush(Color.FromRgb(220, 220, 225)),
+            BorderBrush = new SolidColorBrush(Color.FromRgb(80, 80, 85)),
+            BorderThickness = new Thickness(1),
+            CornerRadius = new CornerRadius(4),
+        };
+        _searchTextBox.AddHandler(KeyDownEvent, OnSearchKeyDown, RoutingStrategies.Tunnel);
+        _searchTextBox.PropertyChanged += (_, e) =>
+        {
+            if (e.Property == TextBox.TextProperty) OnSearchTextChanged();
+        };
+
+        _searchCountLabel = new TextBlock
+        {
+            FontSize = 11,
+            Foreground = new SolidColorBrush(Color.FromRgb(160, 160, 165)),
+            VerticalAlignment = VerticalAlignment.Center,
+            MinWidth = 50,
+        };
+
+        var prevBtn = new Button
+        {
+            Content = "\u25B2", FontSize = 10,
+            Padding = new Thickness(6, 2),
+            Background = Brushes.Transparent,
+            Foreground = new SolidColorBrush(Color.FromRgb(200, 200, 205)),
+            BorderThickness = new Thickness(0),
+            Cursor = new Cursor(StandardCursorType.Hand),
+        };
+        prevBtn.Click += (_, _) => SearchNavigate(-1);
+
+        var nextBtn = new Button
+        {
+            Content = "\u25BC", FontSize = 10,
+            Padding = new Thickness(6, 2),
+            Background = Brushes.Transparent,
+            Foreground = new SolidColorBrush(Color.FromRgb(200, 200, 205)),
+            BorderThickness = new Thickness(0),
+            Cursor = new Cursor(StandardCursorType.Hand),
+        };
+        nextBtn.Click += (_, _) => SearchNavigate(1);
+
+        var closeBtn = new Button
+        {
+            Content = "\u00D7", FontSize = 14,
+            Padding = new Thickness(6, 0),
+            Background = Brushes.Transparent,
+            Foreground = new SolidColorBrush(Color.FromRgb(200, 200, 205)),
+            BorderThickness = new Thickness(0),
+            Cursor = new Cursor(StandardCursorType.Hand),
+        };
+        closeBtn.Click += (_, _) => HideSearchBar();
+
+        var panel = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            Spacing = 4,
+        };
+        panel.Children.Add(_searchTextBox);
+        panel.Children.Add(_searchCountLabel);
+        panel.Children.Add(prevBtn);
+        panel.Children.Add(nextBtn);
+        panel.Children.Add(closeBtn);
+
+        _searchBar = new Border
+        {
+            Child = panel,
+            Background = new SolidColorBrush(Color.FromRgb(38, 38, 40)),
+            BorderBrush = new SolidColorBrush(Color.FromRgb(65, 65, 70)),
+            BorderThickness = new Thickness(0, 0, 0, 1),
+            Padding = new Thickness(8, 4),
+            HorizontalAlignment = HorizontalAlignment.Right,
+            VerticalAlignment = VerticalAlignment.Top,
+            IsVisible = false,
+        };
+
+        VisualChildren.Add(_searchBar);
+        LogicalChildren.Add(_searchBar);
+    }
+
+    public void ShowSearchBar()
+    {
+        if (_searchBar == null) return;
+        _searchVisible = true;
+        _searchBar.IsVisible = true;
+        _searchTextBox?.Focus();
+        _searchTextBox?.SelectAll();
+        InvalidateMeasure();
+        InvalidateVisual();
+    }
+
+    public void HideSearchBar()
+    {
+        if (_searchBar == null) return;
+        _searchVisible = false;
+        _searchBar.IsVisible = false;
+        _searchMatches.Clear();
+        _searchCurrentIndex = -1;
+        _searchTerm = "";
+        _inputTextBox.Focus();
+        InvalidateVisual();
+    }
+
+    private void OnSearchKeyDown(object? sender, KeyEventArgs e)
+    {
+        if (e.Key == Key.Escape) { HideSearchBar(); e.Handled = true; }
+        else if (e.Key == Key.Enter && e.KeyModifiers.HasFlag(KeyModifiers.Shift)) { SearchNavigate(-1); e.Handled = true; }
+        else if (e.Key == Key.Enter) { SearchNavigate(1); e.Handled = true; }
+    }
+
+    private void OnSearchTextChanged()
+    {
+        var term = _searchTextBox?.Text ?? "";
+        if (term == _searchTerm) return;
+        _searchTerm = term;
+        UpdateSearchMatches();
+    }
+
+    private void UpdateSearchMatches()
+    {
+        _searchMatches.Clear();
+        _searchCurrentIndex = -1;
+
+        if (string.IsNullOrEmpty(_searchTerm))
+        {
+            _searchCountLabel!.Text = "";
+            InvalidateVisual();
+            return;
+        }
+
+        int totalRows = _buffer.Scrollback.Count + _buffer.Rows;
+        for (int absRow = 0; absRow < totalRows; absRow++)
+        {
+            var rowText = GetRowText(absRow);
+            int idx = 0;
+            while ((idx = rowText.IndexOf(_searchTerm, idx, StringComparison.OrdinalIgnoreCase)) >= 0)
+            {
+                _searchMatches.Add((absRow, idx, _searchTerm.Length));
+                idx += _searchTerm.Length;
+            }
+        }
+
+        _searchCurrentIndex = _searchMatches.Count > 0 ? 0 : -1;
+        UpdateSearchCountLabel();
+        ScrollToCurrentMatch();
+        InvalidateVisual();
+    }
+
+    private string GetRowText(int absRow)
+    {
+        var sb = new System.Text.StringBuilder();
+        int scrollbackCount = _buffer.Scrollback.Count;
+        for (int col = 0; col < _buffer.Cols; col++)
+        {
+            TerminalCell cell;
+            if (absRow < scrollbackCount)
+            {
+                var line = _buffer.GetScrollbackLine(absRow);
+                cell = (line != null && col < line.Length) ? line[col] : TerminalCell.Empty;
+            }
+            else
+            {
+                cell = _buffer.GetCell(absRow - scrollbackCount, col);
+            }
+            if (cell.Attributes.HasFlag(CellAttributes.WideCharTrail)) continue;
+            sb.Append(cell.Character == '\0' ? ' ' : cell.Character);
+        }
+        return sb.ToString();
+    }
+
+    private void SearchNavigate(int direction)
+    {
+        if (_searchMatches.Count == 0) return;
+        _searchCurrentIndex = (_searchCurrentIndex + direction + _searchMatches.Count) % _searchMatches.Count;
+        UpdateSearchCountLabel();
+        ScrollToCurrentMatch();
+        InvalidateVisual();
+    }
+
+    private void UpdateSearchCountLabel()
+    {
+        if (_searchCountLabel == null) return;
+        _searchCountLabel.Text = _searchMatches.Count > 0
+            ? $"{_searchCurrentIndex + 1}/{_searchMatches.Count}"
+            : "0";
+    }
+
+    private void ScrollToCurrentMatch()
+    {
+        if (_searchCurrentIndex < 0 || _searchCurrentIndex >= _searchMatches.Count) return;
+        var (absRow, _, _) = _searchMatches[_searchCurrentIndex];
+        int scrollbackCount = _buffer.Scrollback.Count;
+        int screenRow = absRow - scrollbackCount + _scrollOffset;
+        if (screenRow < 0 || screenRow >= _buffer.Rows)
+        {
+            _scrollOffset = Math.Clamp(scrollbackCount - absRow + _buffer.Rows / 2, 0, scrollbackCount);
+        }
+    }
+
+    private bool IsCellSearchHighlighted(int absRow, int col, out bool isCurrent)
+    {
+        isCurrent = false;
+        if (_searchMatches.Count == 0) return false;
+        for (int i = 0; i < _searchMatches.Count; i++)
+        {
+            var (mRow, mCol, mLen) = _searchMatches[i];
+            if (absRow == mRow && col >= mCol && col < mCol + mLen)
+            {
+                isCurrent = (i == _searchCurrentIndex);
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // ── Export ──
+
+    public string ExportAsText()
+    {
+        var sb = new System.Text.StringBuilder();
+        int totalRows = _buffer.Scrollback.Count + _buffer.Rows;
+        for (int absRow = 0; absRow < totalRows; absRow++)
+        {
+            var rowText = GetRowText(absRow).TrimEnd();
+            int scrollbackCount = _buffer.Scrollback.Count;
+            bool isWrapped = absRow < scrollbackCount
+                ? _buffer.IsScrollbackLineWrapped(absRow)
+                : _buffer.IsLineWrapped(absRow - scrollbackCount);
+            sb.Append(rowText);
+            if (!isWrapped) sb.AppendLine();
+        }
+        return sb.ToString().TrimEnd();
+    }
+
+    // ── Scroll & Zoom ──
+
     protected override void OnPointerWheelChanged(PointerWheelEventArgs e)
     {
         base.OnPointerWheelChanged(e);
+
+        // Ctrl+Scroll: font zoom
+        if (e.KeyModifiers.HasFlag(KeyModifiers.Control))
+        {
+            double newSize = _fontSize + (e.Delta.Y > 0 ? 1 : -1);
+            newSize = Math.Clamp(newSize, 8, 32);
+            if (newSize != _fontSize)
+            {
+                SetFont(_typeface.FontFamily.Name, newSize);
+                FontSizeChanged?.Invoke(newSize);
+            }
+            e.Handled = true;
+            return;
+        }
 
         if (_buffer.IsAltBuffer)
         {
@@ -773,6 +1242,9 @@ public class TerminalControl : Control, IDisposable
                 // Skip wide-char trail cells (the lead cell already covers this space)
                 if (cell.Attributes.HasFlag(CellAttributes.WideCharTrail))
                 {
+                    // Orphaned trail (no preceding wide lead) — treat as empty cell
+                    if (col == 0 || !TerminalBuffer.IsWideChar(GetCellAt(row, col - 1).Character))
+                        x += _cellWidth;
                     continue;
                 }
 
@@ -807,6 +1279,19 @@ public class TerminalControl : Control, IDisposable
                 if (IsCellSelected(row, col))
                     context.FillRectangle(new SolidColorBrush(Color.FromArgb(90, 50, 120, 220)),
                         new Rect(x, y, cellW, _cellHeight));
+
+                // Draw search match highlight
+                if (_searchMatches.Count > 0)
+                {
+                    int absRowForSearch = ScreenRowToAbsolute(row);
+                    if (IsCellSearchHighlighted(absRowForSearch, col, out bool isCurrent))
+                    {
+                        var hlColor = isCurrent
+                            ? Color.FromArgb(180, 230, 160, 0)   // current match: orange
+                            : Color.FromArgb(100, 200, 200, 50); // other matches: yellow
+                        context.FillRectangle(new SolidColorBrush(hlColor), new Rect(x, y, cellW, _cellHeight));
+                    }
+                }
 
                 // Draw character
                 if (cell.Character > ' ')
@@ -969,6 +1454,17 @@ public class TerminalControl : Control, IDisposable
     public void FocusTerminal()
     {
         _inputTextBox.Focus();
+    }
+
+    /// <summary>
+    /// Send /exit command and wait for the process to exit gracefully.
+    /// Returns true if process exited within timeout.
+    /// </summary>
+    public async Task<bool> SendExitAndWaitAsync(int timeoutMs = 3000)
+    {
+        if (_pty == null || !_pty.IsRunning) return true;
+        _pty.WriteInput("/exit\r");
+        return await Task.Run(() => _pty.WaitForExitTimeout(timeoutMs));
     }
 
     public void Dispose()

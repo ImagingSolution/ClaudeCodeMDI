@@ -4,6 +4,7 @@ using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Reflection;
+using System.Threading.Tasks;
 using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Controls.Shapes;
@@ -26,6 +27,8 @@ public partial class MainWindow : Window
 
     private string? _projectFolder;
     private string? _gitRepoUrl;
+    private FileSystemWatcher? _fileWatcher;
+    private DispatcherTimer? _fileWatcherDebounce;
     private readonly UsageTracker _usageTracker = new();
     private bool _isDark = true;
     private MdiLayout _layout = MdiLayout.Maximize;
@@ -91,6 +94,7 @@ public partial class MainWindow : Window
         _isDark = _settings.IsDark;
 
         _usageTracker.Start();
+        _usageTracker.Updated += OnUsageUpdated;
 
         _projectFolder = !string.IsNullOrEmpty(_settings.ProjectFolder) && Directory.Exists(_settings.ProjectFolder)
             ? _settings.ProjectFolder
@@ -101,6 +105,9 @@ public partial class MainWindow : Window
         {
             Dispatcher.UIThread.Post(ArrangeChildren, DispatcherPriority.Render);
         };
+
+        // Global keyboard shortcuts
+        KeyDown += OnGlobalKeyDown;
 
         // Apply saved language
         Loc.Language = _settings.Language;
@@ -153,6 +160,7 @@ public partial class MainWindow : Window
         MenuTreeOpenWith.Header = Loc.Get("OpenWith");
         MenuTreeShowInExplorer.Header = Loc.Get("ShowInExplorer");
         MenuTreeCopyPath.Header = Loc.Get("CopyPath");
+        MenuTreeCopyFilename.Header = Loc.Get("CopyFilename");
 
         // Settings panel labels
         LblConsoleSettings.Text = Loc.Get("ConsoleSettings");
@@ -315,6 +323,51 @@ public partial class MainWindow : Window
         }
     }
 
+    private void StartFileWatcher()
+    {
+        _fileWatcher?.Dispose();
+        _fileWatcher = null;
+
+        if (string.IsNullOrEmpty(_projectFolder) || !Directory.Exists(_projectFolder))
+            return;
+
+        var watcher = new FileSystemWatcher(_projectFolder)
+        {
+            IncludeSubdirectories = true,
+            NotifyFilter = NotifyFilters.FileName | NotifyFilters.DirectoryName
+        };
+
+        void OnChanged(object s, FileSystemEventArgs e) => ScheduleFileTreeRefresh();
+        void OnRenamed(object s, RenamedEventArgs e) => ScheduleFileTreeRefresh();
+
+        watcher.Created += OnChanged;
+        watcher.Deleted += OnChanged;
+        watcher.Renamed += OnRenamed;
+        watcher.EnableRaisingEvents = true;
+        _fileWatcher = watcher;
+    }
+
+    private void ScheduleFileTreeRefresh()
+    {
+        Dispatcher.UIThread.Post(() =>
+        {
+            if (_fileWatcherDebounce == null)
+            {
+                _fileWatcherDebounce = new DispatcherTimer
+                {
+                    Interval = TimeSpan.FromMilliseconds(500)
+                };
+                _fileWatcherDebounce.Tick += (_, _) =>
+                {
+                    _fileWatcherDebounce.Stop();
+                    RefreshFileTree();
+                };
+            }
+            _fileWatcherDebounce.Stop();
+            _fileWatcherDebounce.Start();
+        });
+    }
+
     private FileTreeNode? GetSelectedTreeNode()
     {
         return FileTree.SelectedItem as FileTreeNode;
@@ -367,13 +420,22 @@ public partial class MainWindow : Window
     private async void OnTreeCopyPath(object? sender, RoutedEventArgs e)
     {
         var node = GetSelectedTreeNode();
-        if (node == null) return;
+        if (node != null) await CopyToClipboard(node.FullPath);
+    }
 
+    private async void OnTreeCopyFilename(object? sender, RoutedEventArgs e)
+    {
+        var node = GetSelectedTreeNode();
+        if (node != null) await CopyToClipboard(System.IO.Path.GetFileName(node.FullPath));
+    }
+
+    private async Task CopyToClipboard(string text)
+    {
         try
         {
             var clipboard = TopLevel.GetTopLevel(this)?.Clipboard;
             if (clipboard != null)
-                await clipboard.SetTextAsync(node.FullPath);
+                await clipboard.SetTextAsync(text);
         }
         catch { }
     }
@@ -846,6 +908,7 @@ public partial class MainWindow : Window
         RefreshGitInfo();
         RefreshSessionList();
         RefreshFileTree();
+        StartFileWatcher();
     }
 
     private void OnRepoNameDoubleTapped(object? sender, TappedEventArgs e)
@@ -974,6 +1037,139 @@ public partial class MainWindow : Window
         }
     }
 
+    // ── Global Keyboard Shortcuts ──
+
+    private void OnGlobalKeyDown(object? sender, KeyEventArgs e)
+    {
+        // Ctrl+N: New Claude session
+        if (e.Key == Key.N && e.KeyModifiers.HasFlag(KeyModifiers.Control))
+        {
+            LaunchClaudeWithInitialPrompt();
+            e.Handled = true;
+            return;
+        }
+        // Ctrl+W: Close active tab
+        if (e.Key == Key.W && e.KeyModifiers.HasFlag(KeyModifiers.Control))
+        {
+            if (_activeChildIndex >= 0 && _activeChildIndex < _children.Count)
+                CloseChild(_children[_activeChildIndex]);
+            e.Handled = true;
+            return;
+        }
+        // Ctrl+Tab / Ctrl+Shift+Tab: Switch tabs
+        if (e.Key == Key.Tab && e.KeyModifiers.HasFlag(KeyModifiers.Control))
+        {
+            if (_children.Count > 1)
+            {
+                int dir = e.KeyModifiers.HasFlag(KeyModifiers.Shift) ? -1 : 1;
+                int next = (_activeChildIndex + dir + _children.Count) % _children.Count;
+                BringToFront(next);
+                _children[next].Terminal.FocusTerminal();
+            }
+            e.Handled = true;
+            return;
+        }
+        // Ctrl+Shift+E: Toggle explorer
+        if (e.Key == Key.E && e.KeyModifiers == (KeyModifiers.Control | KeyModifiers.Shift))
+        {
+            ToggleSidePanel(SidebarPanel.Explorer);
+            e.Handled = true;
+            return;
+        }
+    }
+
+    // ── Status Bar Updates ──
+
+    private void OnUsageUpdated()
+    {
+        Dispatcher.UIThread.Post(() =>
+        {
+            var today = _usageTracker.GetTodayActivity();
+            if (today != null && today.TodayMessages > 0)
+                StatusUsageText.Text = $"{today.TodayMessages} {Loc.Get("Msgs")}";
+            else
+                StatusUsageText.Text = "";
+        });
+    }
+
+    private void OnUsageDoubleTapped(object? sender, TappedEventArgs e)
+    {
+        var chart = new UsageChartWindow();
+        chart.Show(this);
+        e.Handled = true;
+    }
+
+    private void UpdateTerminalStatus()
+    {
+        if (_activeChildIndex >= 0 && _activeChildIndex < _children.Count)
+        {
+            var terminal = _children[_activeChildIndex].Terminal;
+            bool running = _children[_activeChildIndex].StatusDot.Fill is SolidColorBrush b
+                           && b.Color == Color.FromRgb(48, 209, 88);
+            StatusTerminalDot.Fill = running
+                ? new SolidColorBrush(Color.FromRgb(48, 209, 88))
+                : new SolidColorBrush(Color.FromRgb(142, 142, 147));
+            StatusTerminalState.Text = running ? Loc.Get("Running") : Loc.Get("Exited");
+        }
+        else
+        {
+            StatusTerminalDot.Fill = new SolidColorBrush(Color.FromRgb(100, 100, 105));
+            StatusTerminalState.Text = Loc.Get("Ready");
+        }
+    }
+
+    // ── Tab Context Menu ──
+
+    private ContextMenu CreateTabContextMenu(MdiChildInfo entry)
+    {
+        var closeItem = new MenuItem { Header = Loc.Get("Close") };
+        closeItem.Click += (_, _) => CloseChild(entry);
+
+        var closeOthersItem = new MenuItem { Header = Loc.Get("CloseOthers") };
+        closeOthersItem.Click += (_, _) =>
+        {
+            var toClose = _children.Where(c => c != entry).ToList();
+            foreach (var c in toClose) CloseChild(c);
+        };
+
+        var closeRightItem = new MenuItem { Header = Loc.Get("CloseToRight") };
+        closeRightItem.Click += (_, _) =>
+        {
+            int idx = _children.IndexOf(entry);
+            var toClose = _children.Skip(idx + 1).ToList();
+            foreach (var c in toClose) CloseChild(c);
+        };
+
+        var dupItem = new MenuItem { Header = Loc.Get("Duplicate") };
+        dupItem.Click += (_, _) =>
+        {
+            _projectFolder = entry.ProjectFolder;
+            LaunchClaudeWithInitialPrompt();
+        };
+
+        var exportItem = new MenuItem { Header = Loc.Get("ExportOutput") };
+        exportItem.Click += async (_, _) =>
+        {
+            var file = await StorageProvider.SaveFilePickerAsync(new FilePickerSaveOptions
+            {
+                Title = Loc.Get("ExportOutput"),
+                DefaultExtension = "txt",
+                SuggestedFileName = $"claude_output_{DateTime.Now:yyyyMMdd_HHmmss}",
+                FileTypeChoices = new[] { new FilePickerFileType("Text") { Patterns = new[] { "*.txt" } } }
+            });
+            if (file != null)
+            {
+                var text = entry.Terminal.ExportAsText();
+                await System.IO.File.WriteAllTextAsync(file.Path.LocalPath, text);
+            }
+        };
+
+        return new ContextMenu
+        {
+            Items = { closeItem, closeOthersItem, closeRightItem, new Separator(), dupItem, exportItem }
+        };
+    }
+
     // ── Layout switching ──
 
     private void OnLayoutTile(object? sender, RoutedEventArgs e)
@@ -1088,6 +1284,7 @@ public partial class MainWindow : Window
         }
 
         UpdateStripSelection();
+        UpdateTerminalStatus();
 
         // Switch project context to match the active child
         var childFolder = _children[index].ProjectFolder;
@@ -1273,6 +1470,9 @@ public partial class MainWindow : Window
         closeBtn.Click += (_, _) => CloseChild(entry);
         stripCloseBtn.Click += (_, e) => { CloseChild(entry); e.Handled = true; };
 
+        // Tab context menu (right-click)
+        stripButton.ContextMenu = CreateTabContextMenu(entry);
+
         stripButton.Click += (_, _) =>
         {
             int idx = _children.IndexOf(entry);
@@ -1345,6 +1545,14 @@ public partial class MainWindow : Window
             dot.Fill = new SolidColorBrush(Color.FromRgb(142, 142, 147));   // Apple systemGray
             stripDot.Fill = new SolidColorBrush(Color.FromRgb(142, 142, 147));
             RefreshSessionList();
+            UpdateTerminalStatus();
+        };
+
+        // Sync font size from Ctrl+Scroll zoom
+        terminal.FontSizeChanged += newSize =>
+        {
+            _settings.FontSize = newSize;
+            NumSettingsFontSize.Value = (decimal)newSize;
         };
 
         _children.Add(entry);
@@ -1364,11 +1572,12 @@ public partial class MainWindow : Window
         }, DispatcherPriority.Background);
     }
 
-    private void CloseChild(MdiChildInfo entry)
+    private async void CloseChild(MdiChildInfo entry)
     {
         int idx = _children.IndexOf(entry);
         if (idx < 0) return;
 
+        await entry.Terminal.SendExitAndWaitAsync();
         entry.Terminal.Dispose();
         MdiContainer.Children.Remove(entry.Container);
         WindowStrip.Children.Remove(entry.StripButton);
@@ -1665,17 +1874,27 @@ public partial class MainWindow : Window
         CreateNewChild(cmd, "Claude");
     }
 
-    protected override void OnClosed(EventArgs e)
+    protected override async void OnClosed(EventArgs e)
     {
         base.OnClosed(e);
         CloseWelcomePage();
         _settings.ProjectFolder = _projectFolder ?? "";
         _settings.Save();
         _snippetStore.Save();
+
+        // Send /exit to all terminals and wait for graceful shutdown
+        try
+        {
+            var exitTasks = _children.Select(c => c.Terminal.SendExitAndWaitAsync()).ToArray();
+            await Task.WhenAll(exitTasks);
+        }
+        catch { }
+
         foreach (var child in _children)
         {
             child.Terminal.Dispose();
         }
         _usageTracker.Dispose();
+        _fileWatcher?.Dispose();
     }
 }

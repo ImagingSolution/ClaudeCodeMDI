@@ -308,6 +308,7 @@ public class VtParser
                     switch (p)
                     {
                         case 25: _buffer.CursorVisible = true; break;
+                        case 2004: _buffer.BracketedPasteMode = true; break;
                         case 1049: // Alt screen buffer
                         case 47:
                         case 1047:
@@ -324,6 +325,7 @@ public class VtParser
                     switch (p)
                     {
                         case 25: _buffer.CursorVisible = false; break;
+                        case 2004: _buffer.BracketedPasteMode = false; break;
                         case 1049:
                         case 47:
                         case 1047:

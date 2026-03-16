@@ -22,6 +22,10 @@ public class UsageTracker : IDisposable
     private const int EstimatedDailyLimit = 1000;
 
     public event Action<UsageInfo>? UsageUpdated;
+    public event Action? Updated;
+
+    private UsageInfo? _latestInfo;
+    public UsageInfo? GetTodayActivity() => _latestInfo;
 
     public UsageTracker()
     {
@@ -79,7 +83,9 @@ public class UsageTracker : IDisposable
             // Silently ignore errors
         }
 
+        _latestInfo = info;
         UsageUpdated?.Invoke(info);
+        Updated?.Invoke();
     }
 
     public void Dispose()

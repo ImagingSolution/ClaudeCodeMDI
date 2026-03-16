@@ -5,6 +5,7 @@ using System.ComponentModel;
 using System.IO;
 using System.Linq;
 using System.Runtime.CompilerServices;
+using System.Text.RegularExpressions;
 using Avalonia.Media;
 
 namespace ClaudeCodeMDI;
@@ -73,6 +74,81 @@ public class FileTreeNode : INotifyPropertyChanged
         }
     }
 
+    // ── Gitignore support ──
+
+    private static HashSet<string>? _gitignorePatterns;
+    private static string? _gitignoreRoot;
+
+    public static bool UseGitignore { get; set; } = true;
+
+    private static void LoadGitignore(string rootPath)
+    {
+        _gitignoreRoot = rootPath;
+        _gitignorePatterns = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        var gitignorePath = Path.Combine(rootPath, ".gitignore");
+        if (!File.Exists(gitignorePath)) return;
+
+        try
+        {
+            foreach (var rawLine in File.ReadAllLines(gitignorePath))
+            {
+                var line = rawLine.Trim();
+                if (string.IsNullOrEmpty(line) || line.StartsWith('#'))
+                    continue;
+                _gitignorePatterns.Add(line.TrimEnd('/'));
+            }
+        }
+        catch { }
+    }
+
+    private static bool IsGitignored(string fullPath, bool isDirectory)
+    {
+        if (!UseGitignore || _gitignorePatterns == null || _gitignorePatterns.Count == 0 || _gitignoreRoot == null)
+            return false;
+
+        var name = Path.GetFileName(fullPath);
+        var relativePath = Path.GetRelativePath(_gitignoreRoot, fullPath).Replace('\\', '/');
+
+        foreach (var pattern in _gitignorePatterns)
+        {
+            // Exact name match (e.g. "node_modules", "bin", ".vs")
+            if (string.Equals(name, pattern, StringComparison.OrdinalIgnoreCase))
+                return true;
+
+            // Path-based match (e.g. "dist/", "build/output")
+            if (relativePath.Equals(pattern, StringComparison.OrdinalIgnoreCase))
+                return true;
+
+            // Simple wildcard match (e.g. "*.suo", "*.user")
+            if (pattern.StartsWith('*') && name.EndsWith(pattern[1..], StringComparison.OrdinalIgnoreCase))
+                return true;
+
+            // Directory-only pattern (e.g. "bin/")
+            if (isDirectory && pattern.EndsWith('/') &&
+                string.Equals(name, pattern.TrimEnd('/'), StringComparison.OrdinalIgnoreCase))
+                return true;
+        }
+
+        return false;
+    }
+
+    // Always-hidden directories (version control, IDE, etc.)
+    private static readonly HashSet<string> AlwaysHidden = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ".git", ".svn", ".hg", ".vs", ".idea"
+    };
+
+    private static bool ShouldHide(string fullPath, bool isDirectory)
+    {
+        var name = Path.GetFileName(fullPath);
+        if (isDirectory && AlwaysHidden.Contains(name))
+            return true;
+        return IsGitignored(fullPath, isDirectory);
+    }
+
+    // ── Node creation ──
+
     public static FileTreeNode CreateForPath(string path, bool isDirectory)
     {
         var node = new FileTreeNode
@@ -111,12 +187,14 @@ public class FileTreeNode : INotifyPropertyChanged
         try
         {
             var dirs = Directory.GetDirectories(FullPath)
+                .Where(d => !ShouldHide(d, true))
                 .OrderBy(d => Path.GetFileName(d), StringComparer.OrdinalIgnoreCase);
 
             foreach (var dir in dirs)
                 Children.Add(CreateForPath(dir, true));
 
             var files = Directory.GetFiles(FullPath)
+                .Where(f => !ShouldHide(f, false))
                 .OrderBy(f => Path.GetFileName(f), StringComparer.OrdinalIgnoreCase);
 
             foreach (var file in files)
@@ -127,16 +205,20 @@ public class FileTreeNode : INotifyPropertyChanged
 
     public static ObservableCollection<FileTreeNode> CreateRootNodes(string rootPath)
     {
+        LoadGitignore(rootPath);
+
         var nodes = new ObservableCollection<FileTreeNode>();
         try
         {
             var dirs = Directory.GetDirectories(rootPath)
+                .Where(d => !ShouldHide(d, true))
                 .OrderBy(d => Path.GetFileName(d), StringComparer.OrdinalIgnoreCase);
 
             foreach (var dir in dirs)
                 nodes.Add(CreateForPath(dir, true));
 
             var files = Directory.GetFiles(rootPath)
+                .Where(f => !ShouldHide(f, false))
                 .OrderBy(f => Path.GetFileName(f), StringComparer.OrdinalIgnoreCase);
 
             foreach (var file in files)
