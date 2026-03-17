@@ -79,7 +79,7 @@ public class FileTreeNode : INotifyPropertyChanged
     private static HashSet<string>? _gitignorePatterns;
     private static string? _gitignoreRoot;
 
-    public static bool UseGitignore { get; set; } = true;
+    public static bool UseGitignore { get; set; } = false;
 
     private static void LoadGitignore(string rootPath)
     {
@@ -141,6 +141,7 @@ public class FileTreeNode : INotifyPropertyChanged
 
     private static bool ShouldHide(string fullPath, bool isDirectory)
     {
+        if (!UseGitignore) return false;
         var name = Path.GetFileName(fullPath);
         if (isDirectory && AlwaysHidden.Contains(name))
             return true;
