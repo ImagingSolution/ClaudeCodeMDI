@@ -76,11 +76,11 @@
                             <DataTemplate x:DataType="svc:SessionInfo">
                                 <StackPanel Orientation="Horizontal" Spacing="10">
                                     <Border Background="#18007AFF" CornerRadius="6" Padding="8,3">
-                                        <TextBlock Text="{Binding Timestamp, StringFormat='{}{0:yyyy/MM/dd HH:mm}'}"
+                                        <TextBlock Text="{ReflectionBinding Timestamp, StringFormat='{}{0:yyyy/MM/dd HH:mm}'}"
                                                    FontSize="11" Foreground="#64A5FF"
                                                    VerticalAlignment="Center" />
                                     </Border>
-                                    <TextBlock Text="{Binding Summary}" FontSize="13"
+                                    <TextBlock Text="{ReflectionBinding DisplayTitle}" FontSize="13"
                                                TextTrimming="CharacterEllipsis"
                                                VerticalAlignment="Center"
                                                MaxWidth="400" />

@@ -358,27 +358,21 @@ public partial class MainWindow : Window
                 Margin = new Thickness(0, 5, 0, 0),
             };
 
+            // Show summary (FirstUserInput) if available, otherwise fall back to tab title
+            var displayText = !string.IsNullOrEmpty(child.Terminal.FirstUserInput)
+                ? child.Terminal.FirstUserInput
+                : child.StripText.Text ?? "Claude";
+
             var title = new TextBlock
             {
-                Text = child.StripText.Text ?? "Claude",
+                Text = displayText,
                 FontSize = 13,
                 FontWeight = FontWeight.Normal,
                 TextTrimming = TextTrimming.CharacterEllipsis,
             };
 
-            var summary = new TextBlock
-            {
-                Text = child.Terminal.FirstUserInput ?? "",
-                FontSize = 11,
-                Foreground = new SolidColorBrush(_isDark ? Color.FromArgb(140, 200, 200, 205) : Color.FromArgb(160, 80, 80, 90)),
-                TextTrimming = TextTrimming.CharacterEllipsis,
-                MaxHeight = 16,
-            };
-
             var textStack = new StackPanel { Spacing = 1 };
             textStack.Children.Add(title);
-            if (!string.IsNullOrEmpty(child.Terminal.FirstUserInput))
-                textStack.Children.Add(summary);
 
             var closeBtn = new Button
             {
@@ -1262,10 +1256,11 @@ public partial class MainWindow : Window
         if (CmbSessions.SelectedItem is SessionInfo session)
         {
             string cmd = SessionService.BuildResumeCommand(session.Id);
-            string tabLabel = !string.IsNullOrEmpty(session.Summary)
-                ? session.Summary[..Math.Min(20, session.Summary.Length)]
+            var displayTitle = session.DisplayTitle ?? session.Summary;
+            string tabLabel = !string.IsNullOrEmpty(displayTitle)
+                ? (displayTitle.Length > 30 ? displayTitle[..30] + "..." : displayTitle)
                 : $"Session: {session.Id[..Math.Min(8, session.Id.Length)]}";
-            CreateNewChild(cmd, tabLabel, session.Summary);
+            CreateNewChild(cmd, tabLabel, displayTitle);
         }
     }
 
@@ -1841,9 +1836,11 @@ public partial class MainWindow : Window
             Fill = new SolidColorBrush(Color.FromRgb(48, 209, 88)),  // Apple Green
             VerticalAlignment = VerticalAlignment.Center
         };
+        // Prefer firstInput (session summary) over generic tabTitle
+        var initialTitle = !string.IsNullOrEmpty(firstInput) ? firstInput : tabTitle;
         var titleText = new TextBlock
         {
-            Text = tabTitle,
+            Text = initialTitle,
             FontSize = 13,
             FontWeight = FontWeight.Normal,
             Foreground = new SolidColorBrush(Color.FromRgb(210, 210, 215)),
@@ -1913,7 +1910,7 @@ public partial class MainWindow : Window
         };
         var stripText = new TextBlock
         {
-            Text = tabTitle,
+            Text = initialTitle,
             FontSize = 11,
             VerticalAlignment = VerticalAlignment.Center,
             TextTrimming = TextTrimming.CharacterEllipsis,
@@ -2088,7 +2085,10 @@ public partial class MainWindow : Window
         terminal.TitleChanged += title =>
         {
             if (terminal.IsManualTitle) return; // Manual title takes priority
-            var displayTitle = string.IsNullOrWhiteSpace(title) ? tabTitle : title;
+            // Prefer session summary (FirstUserInput) over terminal OSC title
+            var displayTitle = !string.IsNullOrEmpty(terminal.FirstUserInput)
+                ? terminal.FirstUserInput
+                : (string.IsNullOrWhiteSpace(title) ? tabTitle : title);
             titleText.Text = displayTitle;
             stripText.Text = displayTitle;
             RefreshWindowsPanel();
@@ -2420,7 +2420,7 @@ public partial class MainWindow : Window
             string? summary = null;
             var sessions = await SessionService.GetSessionsForProjectAsync(folderPath);
             if (sessions.Count > 0)
-                summary = sessions[0].Summary;
+                summary = sessions[0].DisplayTitle;
             CreateNewChild("claude -c", "Claude", summary);
         }
         else

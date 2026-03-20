@@ -77,6 +77,12 @@ public class TerminalControl : Control, IDisposable
     private readonly List<(int absRow, int col, int length)> _searchMatches = new();
     private int _searchCurrentIndex = -1;
 
+    // Prompt navigation state: tracks absolute row positions where user submitted input
+    private readonly List<int> _userInputRows = new();
+    private Border? _promptNavBar;
+    private TextBlock? _promptNavLabel;
+    private int _promptNavCurrentIndex = -1;
+
     public string TabTitle { get; private set; } = "Console";
     public bool IsManualTitle { get; set; }
     public string? FirstUserInput { get; set; }
@@ -306,14 +312,19 @@ public class TerminalControl : Control, IDisposable
 
         // If TextBox has text, IME composition is in progress.
         // Let TextBox handle keys (Backspace deletes preedit, etc.)
+        // Exception: Ctrl+C/V/F must always work regardless of IME state
         if (!string.IsNullOrEmpty(_inputTextBox.Text))
         {
             if (e.Key == Key.Escape)
             {
                 _inputTextBox.Text = "";
                 e.Handled = true;
+                return;
             }
-            return;
+            bool isCtrlShortcut = e.KeyModifiers.HasFlag(KeyModifiers.Control)
+                && e.Key is Key.C or Key.V or Key.F or Key.Up or Key.Down;
+            if (!isCtrlShortcut)
+                return;
         }
 
         // Track input start: record cursor position on first interaction after prompt
@@ -353,6 +364,25 @@ public class TerminalControl : Control, IDisposable
             return;
         }
 
+        // Ctrl+Up/Down: navigate between user prompts
+        if (e.KeyModifiers.HasFlag(KeyModifiers.Control))
+        {
+            if (e.Key == Key.Up)
+            {
+                System.Diagnostics.Debug.WriteLine($"[PromptNav] Ctrl+Up pressed. _userInputRows={_userInputRows.Count}, scrollback={_buffer.Scrollback.Count}");
+                NavigatePrompt(-1);
+                e.Handled = true;
+                return;
+            }
+            if (e.Key == Key.Down)
+            {
+                System.Diagnostics.Debug.WriteLine($"[PromptNav] Ctrl+Down pressed. _userInputRows={_userInputRows.Count}, scrollback={_buffer.Scrollback.Count}");
+                NavigatePrompt(1);
+                e.Handled = true;
+                return;
+            }
+        }
+
         // Ctrl+0: reset font size to default
         if (e.Key == Key.D0 && e.KeyModifiers.HasFlag(KeyModifiers.Control))
         {
@@ -381,6 +411,12 @@ public class TerminalControl : Control, IDisposable
         // Enter: send carriage return to PTY (submit)
         if (e.Key == Key.Enter)
         {
+            // Record input position for prompt navigation
+            int submitRow = ScreenRowToAbsolute(_buffer.CursorRow);
+            // Only record if it's a different position from the last recorded one
+            if (_userInputRows.Count == 0 || Math.Abs(_userInputRows[^1] - _inputStartAbsRow) > 1)
+                _userInputRows.Add(_inputStartAbsRow);
+
             // Capture first input as tab title
             if (!_firstInputCaptured && _firstInputBuffer.Length > 0)
             {
@@ -603,6 +639,8 @@ public class TerminalControl : Control, IDisposable
         {
             _parser.Process(new ReadOnlySpan<byte>(data));
             _scrollOffset = 0;
+            if (_promptNavBar is { IsVisible: true })
+                Dispatcher.UIThread.Post(HidePromptNavBar);
         };
         _pty.ProcessExited += () =>
         {
@@ -1155,6 +1193,11 @@ public class TerminalControl : Control, IDisposable
         var text = _expandedTextBox.Text;
         if (!string.IsNullOrEmpty(text))
         {
+            // Record input position for prompt navigation
+            int submitRow = _inputStartAbsRow;
+            if (_userInputRows.Count == 0 || Math.Abs(_userInputRows[^1] - submitRow) > 1)
+                _userInputRows.Add(submitRow);
+
             // Capture first input as tab title
             if (!_firstInputCaptured)
             {
@@ -1500,6 +1543,225 @@ public class TerminalControl : Control, IDisposable
             }
         }
         return false;
+    }
+
+    // ── Prompt Navigation ──
+
+    /// <summary>
+    /// Scan the buffer for likely user prompt positions.
+    /// Detects horizontal rule separators (─, ━, ═, ─── etc.) used by Claude Code CLI
+    /// between Q&A turns, then marks the first non-blank line after as a prompt.
+    /// Also detects prompt markers (❯, ❱) and Human:/User: labels.
+    /// </summary>
+    private List<int> ScanForPromptRows()
+    {
+        var prompts = new List<int>();
+        int totalRows = _buffer.Scrollback.Count + _buffer.Rows;
+        bool afterSeparator = false;
+
+        for (int absRow = 0; absRow < totalRows; absRow++)
+        {
+            var text = GetRowText(absRow).TrimEnd();
+            var trimmed = text.TrimStart();
+
+            // Detect prompt markers (❯ ❱)
+            if (trimmed.Length > 0 && (trimmed[0] == '\u276F' || trimmed[0] == '\u2771'))
+            {
+                prompts.Add(absRow);
+                afterSeparator = false;
+                continue;
+            }
+
+            // Detect horizontal rule separators:
+            // Claude Code uses lines made of box-drawing chars (─ ━ ═ ╌ ╍ ┄ ┅ ┈ ┉)
+            if (text.Length >= 4)
+            {
+                bool isSeparator = true;
+                int ruleChars = 0;
+                foreach (char c in text)
+                {
+                    if (c == ' ') continue;
+                    if (c == '\u2500' || c == '\u2501' || c == '\u2550' ||  // ─ ━ ═
+                        c == '\u254C' || c == '\u254D' || c == '\u2504' ||  // ╌ ╍ ┄
+                        c == '\u2505' || c == '\u2508' || c == '\u2509' ||  // ┅ ┈ ┉
+                        c == '-' || c == '\u2014' || c == '\u2013')          // - — –
+                    {
+                        ruleChars++;
+                    }
+                    else
+                    {
+                        isSeparator = false;
+                        break;
+                    }
+                }
+                if (isSeparator && ruleChars >= 4)
+                {
+                    afterSeparator = true;
+                    continue;
+                }
+            }
+
+            // Blank lines after separator: keep waiting
+            if (afterSeparator && string.IsNullOrWhiteSpace(text))
+                continue;
+
+            // First non-blank line after separator = start of user prompt
+            if (afterSeparator && !string.IsNullOrWhiteSpace(text))
+            {
+                prompts.Add(absRow);
+                afterSeparator = false;
+                continue;
+            }
+
+            afterSeparator = false;
+        }
+
+        System.Diagnostics.Debug.WriteLine($"[PromptNav] ScanForPromptRows found {prompts.Count} prompts in {totalRows} rows");
+        return prompts;
+    }
+
+    /// <summary>Navigate to the previous (-1) or next (+1) user prompt.</summary>
+    private void NavigatePrompt(int direction)
+    {
+        // Use tracked input rows if available, otherwise scan buffer
+        var prompts = _userInputRows.Count > 0 ? _userInputRows : ScanForPromptRows();
+        System.Diagnostics.Debug.WriteLine($"[PromptNav] NavigatePrompt({direction}): found {prompts.Count} prompts, currentIdx={_promptNavCurrentIndex}");
+        if (prompts.Count == 0) return;
+
+        int scrollbackCount = _buffer.Scrollback.Count;
+
+        if (_promptNavCurrentIndex < 0 || _promptNavCurrentIndex >= prompts.Count)
+        {
+            // First navigation: find the prompt nearest to current viewport
+            int currentAbsRow = scrollbackCount - _scrollOffset;
+            _promptNavCurrentIndex = 0;
+            for (int i = prompts.Count - 1; i >= 0; i--)
+            {
+                if (prompts[i] <= currentAbsRow)
+                {
+                    _promptNavCurrentIndex = i;
+                    break;
+                }
+            }
+        }
+
+        // Move index by direction, clamping to valid range
+        int newIndex = _promptNavCurrentIndex + direction;
+        newIndex = Math.Clamp(newIndex, 0, prompts.Count - 1);
+        _promptNavCurrentIndex = newIndex;
+
+        int targetAbsRow = prompts[newIndex];
+
+        // Scroll so the prompt is near the top of the viewport (2 rows margin)
+        _scrollOffset = Math.Clamp(scrollbackCount - targetAbsRow + 2, 0, scrollbackCount);
+
+        UpdatePromptNavLabel(newIndex + 1, prompts.Count);
+        ShowPromptNavBar();
+        InvalidateVisual();
+    }
+
+    private void ShowPromptNavBar()
+    {
+        if (_promptNavBar == null) CreatePromptNavBar();
+        _promptNavBar!.IsVisible = true;
+    }
+
+    private void HidePromptNavBar()
+    {
+        if (_promptNavBar != null)
+            _promptNavBar.IsVisible = false;
+        _promptNavCurrentIndex = -1;
+    }
+
+    private void UpdatePromptNavLabel(int current, int total)
+    {
+        if (_promptNavLabel != null)
+            _promptNavLabel.Text = $"Q {current}/{total}";
+    }
+
+    private void CreatePromptNavBar()
+    {
+        _promptNavLabel = new TextBlock
+        {
+            FontSize = 11,
+            Foreground = new SolidColorBrush(Color.FromRgb(160, 160, 165)),
+            VerticalAlignment = VerticalAlignment.Center,
+            MinWidth = 50,
+        };
+
+        var prevBtn = new Button
+        {
+            Content = "\u25B2", FontSize = 10,
+            Padding = new Thickness(6, 2),
+            Background = Brushes.Transparent,
+            Foreground = new SolidColorBrush(Color.FromRgb(200, 200, 205)),
+            BorderThickness = new Thickness(0),
+            Cursor = new Cursor(StandardCursorType.Hand),
+        };
+        ToolTip.SetTip(prevBtn, "Previous prompt (Ctrl+\u2191)");
+        prevBtn.Click += (_, _) => NavigatePrompt(-1);
+
+        var nextBtn = new Button
+        {
+            Content = "\u25BC", FontSize = 10,
+            Padding = new Thickness(6, 2),
+            Background = Brushes.Transparent,
+            Foreground = new SolidColorBrush(Color.FromRgb(200, 200, 205)),
+            BorderThickness = new Thickness(0),
+            Cursor = new Cursor(StandardCursorType.Hand),
+        };
+        ToolTip.SetTip(nextBtn, "Next prompt (Ctrl+\u2193)");
+        nextBtn.Click += (_, _) => NavigatePrompt(1);
+
+        var closeBtn = new Button
+        {
+            Content = "\u00D7", FontSize = 14,
+            Padding = new Thickness(6, 0),
+            Background = Brushes.Transparent,
+            Foreground = new SolidColorBrush(Color.FromRgb(200, 200, 205)),
+            BorderThickness = new Thickness(0),
+            Cursor = new Cursor(StandardCursorType.Hand),
+        };
+        closeBtn.Click += (_, _) => HidePromptNavBar();
+
+        var label = new TextBlock
+        {
+            Text = "Prompt",
+            FontSize = 11,
+            Foreground = new SolidColorBrush(Color.FromRgb(130, 160, 220)),
+            VerticalAlignment = VerticalAlignment.Center,
+            Margin = new Thickness(0, 0, 4, 0),
+        };
+
+        var panel = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            Spacing = 4,
+        };
+        panel.Children.Add(label);
+        panel.Children.Add(_promptNavLabel);
+        panel.Children.Add(prevBtn);
+        panel.Children.Add(nextBtn);
+        panel.Children.Add(closeBtn);
+
+        _promptNavBar = new Border
+        {
+            Child = panel,
+            Background = new SolidColorBrush(Color.FromRgb(38, 38, 40)),
+            BorderBrush = new SolidColorBrush(Color.FromRgb(65, 65, 70)),
+            BorderThickness = new Thickness(0, 0, 0, 1),
+            Padding = new Thickness(8, 4),
+            HorizontalAlignment = HorizontalAlignment.Left,
+            VerticalAlignment = VerticalAlignment.Top,
+            IsVisible = false,
+        };
+
+        // Position below search bar if present
+        if (_searchBar != null)
+            _promptNavBar.Margin = new Thickness(0, _searchBar.IsVisible ? 30 : 0, 0, 0);
+
+        VisualChildren.Add(_promptNavBar);
+        LogicalChildren.Add(_promptNavBar);
     }
 
     // ── Export ──
