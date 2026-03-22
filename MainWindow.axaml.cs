@@ -160,6 +160,7 @@ public partial class MainWindow : Window
         ToolTip.SetTip(BtnActivityExplorer, Loc.Get("ExplorerTooltip"));
         ToolTip.SetTip(BtnActivitySnippets, Loc.Get("SnippetsTooltip"));
         ToolTip.SetTip(BtnActivityWindows, Loc.Get("WindowsTooltip"));
+        ToolTip.SetTip(BtnActivityDiagram, Loc.Get("DiagramTooltip"));
         ToolTip.SetTip(BtnActivityCompact, Loc.Get("CompactTooltip"));
         ToolTip.SetTip(BtnActivitySettings, Loc.Get("SettingsTooltip"));
 
@@ -183,6 +184,7 @@ public partial class MainWindow : Window
         LblApplySettings.Text = Loc.Get("Apply");
         LblOpenClaudeFolder.Text = Loc.Get("OpenClaudeFolder");
         ChkShowWelcomePage.Content = Loc.Get("ShowWelcomePage");
+        ChkEnableCharts.Content = Loc.Get("EnableCharts");
 
         // Snippets panel
         LblAddSnippet.Text = Loc.Get("AddSnippet");
@@ -220,6 +222,28 @@ public partial class MainWindow : Window
     private void OnActivityWindows(object? sender, RoutedEventArgs e)
     {
         ToggleSidePanel(SidebarPanel.Windows);
+    }
+
+    private async void OnActivityDiagram(object? sender, RoutedEventArgs e)
+    {
+        var typeface = new Avalonia.Media.Typeface(_settings.FontFamily + ", Consolas, Courier New");
+
+        // Check if current terminal has any diagrams (detected or cached)
+        var diagrams = new List<Terminal.CodeBlockInfo>();
+        if (_activeChildIndex >= 0 && _activeChildIndex < _children.Count)
+            diagrams.AddRange(_children[_activeChildIndex].Terminal.GetAllDiagrams());
+
+        if (diagrams.Count > 0)
+        {
+            // Show the most recent cached/detected diagram
+            var win = new Terminal.DiagramWindow(diagrams[^1], _isDark, typeface);
+            win.Show(this);
+        }
+        else
+        {
+            // No diagrams - open file dialog
+            await Terminal.DiagramWindow.OpenFile(this, _isDark, typeface);
+        }
     }
 
     private void OnActivityModeSwitch(object? sender, RoutedEventArgs e)
@@ -679,6 +703,7 @@ public partial class MainWindow : Window
         };
 
         ChkShowWelcomePage.IsChecked = _settings.ShowWelcomePage;
+        ChkEnableCharts.IsChecked = _settings.EnableChartRendering;
         ChkDarkMode.IsChecked = _settings.IsDark;
     }
 
@@ -689,6 +714,14 @@ public partial class MainWindow : Window
         if (_suppressWelcomeCheckChanged) return;
         _settings.ShowWelcomePage = ChkShowWelcomePage.IsChecked == true;
         _settings.Save();
+    }
+
+    private void OnEnableChartsChanged(object? sender, RoutedEventArgs e)
+    {
+        _settings.EnableChartRendering = ChkEnableCharts.IsChecked == true;
+        _settings.Save();
+        foreach (var child in _children)
+            child.Terminal.EnableChartRendering = _settings.EnableChartRendering;
     }
 
     private void OnDarkModeChanged(object? sender, RoutedEventArgs e)
@@ -1261,6 +1294,10 @@ public partial class MainWindow : Window
                 ? (displayTitle.Length > 30 ? displayTitle[..30] + "..." : displayTitle)
                 : $"Session: {session.Id[..Math.Min(8, session.Id.Length)]}";
             CreateNewChild(cmd, tabLabel, displayTitle);
+
+            // Load cached diagrams for this project
+            if (_activeChildIndex >= 0 && _activeChildIndex < _children.Count)
+                _children[_activeChildIndex].Terminal.LoadCachedDiagrams();
         }
     }
 
@@ -1826,7 +1863,7 @@ public partial class MainWindow : Window
 
     private void CreateNewChild(string command, string tabTitle, string? firstInput = null)
     {
-        var terminal = new TerminalControl { IsDarkTheme = _isDark };
+        var terminal = new TerminalControl { IsDarkTheme = _isDark, EnableChartRendering = _settings.EnableChartRendering };
         terminal.SetFont(_settings.FontFamily, _settings.FontSize);
 
         // --- Title bar ---

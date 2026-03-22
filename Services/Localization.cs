@@ -122,6 +122,22 @@ public static class Loc
         // ── Windows Panel ──
         ["WindowsTooltip"] = new() { ["English"] = "Windows", ["日本語"] = "ウィンドウ" },
         ["WINDOWS"] = new() { ["English"] = "WINDOWS", ["日本語"] = "ウィンドウ" },
+
+        // ── Chart/Diagram Rendering ──
+        ["EnableCharts"] = new() { ["English"] = "Enable Chart/Diagram Rendering", ["日本語"] = "チャート/図の描画を有効にする" },
+        ["ChartPreview"] = new() { ["English"] = "Chart Preview", ["日本語"] = "チャートプレビュー" },
+        ["SaveImage"] = new() { ["English"] = "Save Image", ["日本語"] = "画像を保存" },
+        ["CopyImage"] = new() { ["English"] = "Copy Image", ["日本語"] = "画像をコピー" },
+        ["MermaidDiagram"] = new() { ["English"] = "Mermaid Diagram", ["日本語"] = "Mermaid 図" },
+        ["ExcalidrawDiagram"] = new() { ["English"] = "Excalidraw Diagram", ["日本語"] = "Excalidraw 図" },
+        ["BarChart"] = new() { ["English"] = "Bar Chart", ["日本語"] = "棒グラフ" },
+        ["LineChart"] = new() { ["English"] = "Line Chart", ["日本語"] = "折れ線グラフ" },
+        ["PieChart"] = new() { ["English"] = "Pie Chart", ["日本語"] = "円グラフ" },
+        ["ClickToRender"] = new() { ["English"] = "Click to render", ["日本語"] = "クリックして描画" },
+        ["OpenInWindow"] = new() { ["English"] = "Open in Window", ["日本語"] = "ウィンドウで開く" },
+        ["SaveAsArtifact"] = new() { ["English"] = "Save as Artifact", ["日本語"] = "アーティファクトとして保存" },
+        ["OpenArtifact"] = new() { ["English"] = "Open File", ["日本語"] = "ファイルを開く" },
+        ["DiagramTooltip"] = new() { ["English"] = "Diagram Viewer", ["日本語"] = "ダイアグラムビューア" },
     };
 
     public static string Get(string key)
@@ -134,5 +150,16 @@ public static class Loc
             fallback.TryGetValue("English", out var eng))
             return eng;
         return key;
+    }
+
+    public static string Get(string key, string defaultValue)
+    {
+        if (Strings.TryGetValue(key, out var translations) &&
+            translations.TryGetValue(Language, out var text))
+            return text;
+        if (Strings.TryGetValue(key, out var fallback) &&
+            fallback.TryGetValue("English", out var eng))
+            return eng;
+        return defaultValue;
     }
 }

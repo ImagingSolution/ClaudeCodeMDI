@@ -136,6 +136,18 @@
             <Setter Property="Opacity" Value="1" />
             <Setter Property="Background" Value="#18FFFFFF" />
         </Style>
+        <!-- Prevent ScrollBar from expanding on hover (avoid overlapping buttons) -->
+        <Style Selector="ScrollBar:vertical">
+            <Setter Property="Width" Value="8" />
+            <Setter Property="MinWidth" Value="8" />
+        </Style>
+        <Style Selector="ScrollBar:vertical /template/ Thumb">
+            <Setter Property="MinWidth" Value="4" />
+            <Setter Property="Width" Value="4" />
+        </Style>
+        <Style Selector="ScrollBar:vertical:pointerover /template/ Thumb">
+            <Setter Property="Width" Value="6" />
+        </Style>
     </Application.Styles>
 
     <Application.Resources>

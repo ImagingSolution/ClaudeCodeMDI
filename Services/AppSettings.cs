@@ -13,6 +13,7 @@ public class AppSettings
     public string Language { get; set; } = "English";
     public string InitialPrompt { get; set; } = "";
     public bool ShowWelcomePage { get; set; } = true;
+    public bool EnableChartRendering { get; set; } = true;
 
     private static readonly string SettingsDir = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),

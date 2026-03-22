@@ -10,6 +10,7 @@ using Avalonia.Input;
 using Avalonia.Layout;
 using Avalonia.Media;
 using Avalonia.Interactivity;
+using Avalonia.Platform.Storage;
 using Avalonia.Threading;
 
 namespace ClaudeCodeMDI.Terminal;
@@ -83,6 +84,17 @@ public class TerminalControl : Control, IDisposable
     private TextBlock? _promptNavLabel;
     private int _promptNavCurrentIndex = -1;
 
+    // Chart/diagram rendering state
+    private readonly CodeBlockDetector _codeBlockDetector = new();
+    private DispatcherTimer? _codeBlockScanTimer;
+    private bool _codeBlockScanPending;
+    private int _lastCachedBlockCount;
+    private readonly List<CodeBlockInfo> _cachedDiagrams = new();
+    // Cache for parsed Excalidraw elements to survive terminal reflow on resize
+    private List<System.Text.Json.JsonElement>? _excalidrawCacheDrawables;
+    private double _excalidrawCacheMinX, _excalidrawCacheMinY, _excalidrawCacheMaxX, _excalidrawCacheMaxY;
+    public bool EnableChartRendering { get; set; } = true;
+
     public string TabTitle { get; private set; } = "Console";
     public bool IsManualTitle { get; set; }
     public string? FirstUserInput { get; set; }
@@ -105,9 +117,9 @@ public class TerminalControl : Control, IDisposable
 
     private void ApplyThemeColors()
     {
-        var fg = _isDark ? Color.FromRgb(210, 210, 215) : Color.FromRgb(28, 28, 30);
-        var bg = _isDark ? Color.FromRgb(44, 44, 46) : Color.FromRgb(242, 242, 247);
-        var bgDeep = _isDark ? Color.FromRgb(34, 34, 36) : Color.FromRgb(250, 250, 252);
+        var fg = _isDark ? Color.FromRgb(210, 210, 215) : Color.FromRgb(85, 87, 83);       // Light: Tango foreground
+        var bg = _isDark ? Color.FromRgb(44, 44, 46) : Color.FromRgb(242, 242, 242);      // Light: Tango input bg
+        var bgDeep = _isDark ? Color.FromRgb(34, 34, 36) : Color.FromRgb(255, 255, 255);  // Light: white
         var border = _isDark ? Color.FromRgb(56, 56, 58) : Color.FromRgb(198, 198, 200);
         var subtle = _isDark ? Color.FromRgb(160, 160, 165) : Color.FromRgb(100, 100, 105);
 
@@ -242,7 +254,33 @@ public class TerminalControl : Control, IDisposable
         _buffer.BufferChanged += () =>
         {
             Dispatcher.UIThread.Post(InvalidateVisual);
+            ScheduleCodeBlockScan();
         };
+    }
+
+    private void ScheduleCodeBlockScan()
+    {
+        if (_codeBlockScanPending) return;
+        _codeBlockScanPending = true;
+
+        if (_codeBlockScanTimer == null)
+        {
+            _codeBlockScanTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(500) };
+            _codeBlockScanTimer.Tick += (_, _) =>
+            {
+                _codeBlockScanTimer.Stop();
+                _codeBlockScanPending = false;
+                if (!_buffer.IsAltBuffer && EnableChartRendering)
+                {
+                    _codeBlockDetector.IncrementalScan(_buffer);
+                    AutoCacheNewDiagrams();
+                    InvalidateVisual();
+                }
+            };
+        }
+
+        _codeBlockScanTimer.Stop();
+        _codeBlockScanTimer.Start();
     }
 
     private static bool IsHalfWidth(string text)
@@ -632,6 +670,7 @@ public class TerminalControl : Control, IDisposable
         _buffer.BufferChanged += () =>
         {
             Dispatcher.UIThread.Post(InvalidateVisual);
+            ScheduleCodeBlockScan();
         };
 
         _pty = new PseudoConsole();
@@ -691,6 +730,7 @@ public class TerminalControl : Control, IDisposable
             double sbW = Math.Min(_searchBar.DesiredSize.Width, finalSize.Width);
             _searchBar.Arrange(new Rect(finalSize.Width - sbW, 0, sbW, _searchBar.DesiredSize.Height));
         }
+
         return finalSize;
     }
 
@@ -749,6 +789,20 @@ public class TerminalControl : Control, IDisposable
     protected override void OnPointerPressed(PointerPressedEventArgs e)
     {
         base.OnPointerPressed(e);
+
+        // Right-click on diagram: show context menu
+        if (e.GetCurrentPoint(this).Properties.IsRightButtonPressed)
+        {
+            var pos = e.GetPosition(this);
+            var diagramBlock = HitTestDiagram(pos);
+            if (diagramBlock != null)
+            {
+                ShowDiagramContextMenu(diagramBlock, pos);
+                e.Handled = true;
+                return;
+            }
+        }
+
         if (e.GetCurrentPoint(this).Properties.IsLeftButtonPressed)
         {
             Clicked?.Invoke();
@@ -1764,6 +1818,501 @@ public class TerminalControl : Control, IDisposable
         LogicalChildren.Add(_promptNavBar);
     }
 
+    // ── Diagram Cache ──
+
+    private void AutoCacheNewDiagrams()
+    {
+        var blocks = _codeBlockDetector.DetectedBlocks;
+        if (blocks.Count <= _lastCachedBlockCount) return;
+
+        for (int i = _lastCachedBlockCount; i < blocks.Count; i++)
+        {
+            var block = blocks[i];
+            if (block.Type == CodeBlockType.Excalidraw && block.Content.Length > 50)
+            {
+                Services.DiagramCache.Save(_workingDirectory ?? "", block);
+            }
+        }
+        _lastCachedBlockCount = blocks.Count;
+    }
+
+    /// <summary>
+    /// Load cached diagrams from disk for the current project folder.
+    /// Called when a session is resumed or when the terminal starts.
+    /// </summary>
+    public void LoadCachedDiagrams()
+    {
+        if (string.IsNullOrEmpty(_workingDirectory)) return;
+        _cachedDiagrams.Clear();
+        _cachedDiagrams.AddRange(Services.DiagramCache.Load(_workingDirectory));
+        if (_cachedDiagrams.Count > 0)
+            InvalidateVisual();
+    }
+
+    /// <summary>
+    /// Get all diagrams (detected + cached) for display.
+    /// </summary>
+    public IReadOnlyList<CodeBlockInfo> GetAllDiagrams()
+    {
+        var result = new List<CodeBlockInfo>(_cachedDiagrams);
+        foreach (var block in _codeBlockDetector.DetectedBlocks)
+        {
+            if (block.Type == CodeBlockType.Excalidraw && block.Content.Length > 50)
+                result.Add(block);
+        }
+        return result;
+    }
+
+    // ── Diagram Export ──
+
+    private void ShowDiagramContextMenu(CodeBlockInfo block, Point pos)
+    {
+        var menu = new Avalonia.Controls.ContextMenu();
+
+        var openItem = new Avalonia.Controls.MenuItem
+        {
+            Header = Services.Loc.Get("OpenInWindow"),
+        };
+        openItem.Click += (_, _) =>
+        {
+            var win = new DiagramWindow(block, _isDark, _typeface);
+            var topLevel = TopLevel.GetTopLevel(this);
+            if (topLevel is Window parentWindow)
+                win.Show(parentWindow);
+            else
+                win.Show();
+        };
+
+        var artifactItem = new Avalonia.Controls.MenuItem
+        {
+            Header = Services.Loc.Get("SaveAsArtifact"),
+        };
+        artifactItem.Click += async (_, _) => await SaveAsArtifact(block);
+
+        var saveItem = new Avalonia.Controls.MenuItem
+        {
+            Header = Services.Loc.Get("SaveImage"),
+        };
+        saveItem.Click += async (_, _) => await ExportDiagramAsPng(block);
+
+        var copyItem = new Avalonia.Controls.MenuItem
+        {
+            Header = Services.Loc.Get("CopyImage"),
+        };
+        copyItem.Click += async (_, _) => await CopyDiagramToClipboard(block);
+
+        menu.Items.Add(openItem);
+        menu.Items.Add(new Avalonia.Controls.Separator());
+        menu.Items.Add(artifactItem);
+        menu.Items.Add(saveItem);
+        menu.Items.Add(copyItem);
+        menu.Open(this);
+    }
+
+    private async Task SaveAsArtifact(CodeBlockInfo block)
+    {
+        try
+        {
+            var topLevel = TopLevel.GetTopLevel(this);
+            if (topLevel == null) return;
+
+            var file = await topLevel.StorageProvider.SaveFilePickerAsync(new FilePickerSaveOptions
+            {
+                Title = Services.Loc.Get("SaveAsArtifact"),
+                DefaultExtension = "excalidraw",
+                FileTypeChoices = new[]
+                {
+                    new FilePickerFileType("Excalidraw") { Patterns = new[] { "*.excalidraw" } },
+                    new FilePickerFileType("PNG Image") { Patterns = new[] { "*.png" } },
+                    new FilePickerFileType("SVG Image") { Patterns = new[] { "*.svg" } },
+                },
+                SuggestedFileName = $"artifact_{DateTime.Now:yyyyMMdd_HHmmss}"
+            });
+
+            if (file == null) return;
+
+            var path = file.Path.LocalPath;
+            var ext = Path.GetExtension(path).ToLowerInvariant();
+
+            if (ext == ".excalidraw")
+            {
+                // Save as Excalidraw native format
+                var cleanJson = CleanJsonWhitespace(block.Content);
+                var excalidrawDoc = $@"{{
+  ""type"": ""excalidraw"",
+  ""version"": 2,
+  ""source"": ""ClaudeCodeMDI"",
+  ""elements"": {cleanJson},
+  ""appState"": {{
+    ""viewBackgroundColor"": ""{(_isDark ? "#1e1e1e" : "#ffffff")}""
+  }}
+}}";
+                await File.WriteAllTextAsync(path, excalidrawDoc);
+            }
+            else if (ext == ".svg")
+            {
+                // Save as SVG
+                var svg = RenderDiagramToSvg(block);
+                if (svg != null)
+                    await File.WriteAllTextAsync(path, svg);
+            }
+            else
+            {
+                // Save as PNG
+                var pngBytes = RenderDiagramToPng(block, 2400, 1200);
+                if (pngBytes != null)
+                    await File.WriteAllBytesAsync(path, pngBytes);
+            }
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"SaveAsArtifact error: {ex.Message}");
+        }
+    }
+
+    private string? RenderDiagramToSvg(CodeBlockInfo block)
+    {
+        try
+        {
+            var cleanJson = CleanJsonWhitespace(block.Content);
+            var elements = System.Text.Json.JsonSerializer.Deserialize<System.Text.Json.JsonElement>(cleanJson);
+            if (elements.ValueKind != System.Text.Json.JsonValueKind.Array) return null;
+
+            var elementMap = new Dictionary<string, System.Text.Json.JsonElement>();
+            foreach (var el in elements.EnumerateArray())
+            {
+                var type = el.TryGetProperty("type", out var t) ? t.GetString() : null;
+                if (type == "cameraUpdate" || type == null) continue;
+                if (type == "delete")
+                {
+                    if (el.TryGetProperty("ids", out var ids))
+                        foreach (var id in (ids.GetString() ?? "").Split(','))
+                            elementMap.Remove(id.Trim());
+                    continue;
+                }
+                if (el.TryGetProperty("id", out var idProp))
+                    elementMap[idProp.GetString() ?? ""] = el;
+            }
+            var drawables = new List<System.Text.Json.JsonElement>(elementMap.Values);
+
+            double minX = double.MaxValue, minY = double.MaxValue;
+            double maxX = double.MinValue, maxY = double.MinValue;
+            foreach (var el in drawables)
+            {
+                double ex = el.TryGetProperty("x", out var xp) ? xp.GetDouble() : 0;
+                double ey = el.TryGetProperty("y", out var yp) ? yp.GetDouble() : 0;
+                double ew = el.TryGetProperty("width", out var wp) ? wp.GetDouble() : 0;
+                double eh = el.TryGetProperty("height", out var hp) ? hp.GetDouble() : 0;
+                minX = Math.Min(minX, ex); minY = Math.Min(minY, ey);
+                maxX = Math.Max(maxX, ex + Math.Max(ew, 10));
+                maxY = Math.Max(maxY, ey + Math.Max(eh, 10));
+            }
+            if (!double.IsFinite(minX)) return null;
+
+            double pad = 20;
+            double w = maxX - minX + pad * 2;
+            double h = maxY - minY + pad * 2;
+            var sb = new System.Text.StringBuilder();
+            sb.AppendLine($@"<svg xmlns=""http://www.w3.org/2000/svg"" width=""{w:F0}"" height=""{h:F0}"" viewBox=""{minX - pad:F0} {minY - pad:F0} {w:F0} {h:F0}"">");
+            sb.AppendLine($@"<rect x=""{minX - pad:F0}"" y=""{minY - pad:F0}"" width=""{w:F0}"" height=""{h:F0}"" fill=""{(_isDark ? "#1e1e1e" : "#ffffff")}""/>");
+
+            foreach (var el in drawables)
+            {
+                var type = el.TryGetProperty("type", out var tp) ? tp.GetString() : "";
+                double ex = el.TryGetProperty("x", out var xp) ? xp.GetDouble() : 0;
+                double ey = el.TryGetProperty("y", out var yp) ? yp.GetDouble() : 0;
+                double ew = el.TryGetProperty("width", out var wp) ? wp.GetDouble() : 0;
+                double eh = el.TryGetProperty("height", out var hp) ? hp.GetDouble() : 0;
+                var stroke = el.TryGetProperty("strokeColor", out var sc) ? sc.GetString() ?? "#1e1e1e" : "#1e1e1e";
+                var fill = el.TryGetProperty("backgroundColor", out var bc) ? bc.GetString() ?? "none" : "none";
+                if (fill == "transparent") fill = "none";
+                double sw = el.TryGetProperty("strokeWidth", out var swp) ? swp.GetDouble() : 1;
+                double opacity = el.TryGetProperty("opacity", out var op) ? op.GetDouble() / 100.0 : 1.0;
+                bool rounded = el.TryGetProperty("roundness", out _);
+                string rx = rounded ? @" rx=""6"" ry=""6""" : "";
+                string opAttr = opacity < 1 ? $@" opacity=""{opacity:F2}""" : "";
+
+                if (type == "rectangle")
+                {
+                    sb.AppendLine($@"<rect x=""{ex:F1}"" y=""{ey:F1}"" width=""{ew:F1}"" height=""{eh:F1}"" fill=""{fill}"" stroke=""{stroke}"" stroke-width=""{sw}""{rx}{opAttr}/>");
+                    if (el.TryGetProperty("label", out var lbl) && lbl.TryGetProperty("text", out var lt))
+                    {
+                        double fs = lbl.TryGetProperty("fontSize", out var lf) ? lf.GetDouble() : 16;
+                        sb.AppendLine($@"<text x=""{ex + ew / 2:F1}"" y=""{ey + eh / 2:F1}"" text-anchor=""middle"" dominant-baseline=""central"" font-size=""{fs}"" fill=""{stroke}"">{EscapeXml(lt.GetString() ?? "")}</text>");
+                    }
+                }
+                else if (type == "text")
+                {
+                    var text = el.TryGetProperty("text", out var tt) ? tt.GetString() ?? "" : "";
+                    double fs = el.TryGetProperty("fontSize", out var fsp) ? fsp.GetDouble() : 16;
+                    double ty = ey + fs;
+                    foreach (var line in text.Split('\n'))
+                    {
+                        sb.AppendLine($@"<text x=""{ex:F1}"" y=""{ty:F1}"" font-size=""{fs}"" fill=""{stroke}""{opAttr}>{EscapeXml(line)}</text>");
+                        ty += fs * 1.3;
+                    }
+                }
+                else if (type == "arrow" || type == "line")
+                {
+                    if (el.TryGetProperty("points", out var pts))
+                    {
+                        var points = new List<(double x, double y)>();
+                        foreach (var pt in pts.EnumerateArray())
+                        {
+                            int idx = 0; double px = 0, py = 0;
+                            foreach (var v in pt.EnumerateArray()) { if (idx == 0) px = v.GetDouble(); else if (idx == 1) py = v.GetDouble(); idx++; }
+                            if (idx >= 2) points.Add((ex + px, ey + py));
+                        }
+                        if (points.Count >= 2)
+                        {
+                            var d = $"M {points[0].x:F1} {points[0].y:F1}";
+                            for (int i = 1; i < points.Count; i++)
+                                d += $" L {points[i].x:F1} {points[i].y:F1}";
+                            string marker = "";
+                            if (type == "arrow" && el.TryGetProperty("endArrowhead", out var ea) && ea.GetString() != null)
+                                marker = @" marker-end=""url(#arrowhead)""";
+                            sb.AppendLine($@"<path d=""{d}"" fill=""none"" stroke=""{stroke}"" stroke-width=""{sw}""{marker}{opAttr}/>");
+                        }
+                    }
+                }
+                else if (type == "ellipse")
+                {
+                    sb.AppendLine($@"<ellipse cx=""{ex + ew / 2:F1}"" cy=""{ey + eh / 2:F1}"" rx=""{ew / 2:F1}"" ry=""{eh / 2:F1}"" fill=""{fill}"" stroke=""{stroke}"" stroke-width=""{sw}""{opAttr}/>");
+                }
+            }
+
+            sb.AppendLine(@"<defs><marker id=""arrowhead"" markerWidth=""10"" markerHeight=""7"" refX=""10"" refY=""3.5"" orient=""auto""><polygon points=""0 0, 10 3.5, 0 7"" fill=""#1e1e1e""/></marker></defs>");
+            sb.AppendLine("</svg>");
+            return sb.ToString();
+        }
+        catch { return null; }
+    }
+
+    private static string EscapeXml(string s) =>
+        s.Replace("&", "&amp;").Replace("<", "&lt;").Replace(">", "&gt;").Replace("\"", "&quot;");
+
+    private CodeBlockInfo? HitTestDiagram(Point pos)
+    {
+        if (!EnableChartRendering) return null;
+        int viewStart = ScreenRowToAbsolute(0);
+        int viewEnd = ScreenRowToAbsolute(_buffer.Rows - 1);
+        foreach (var block in _codeBlockDetector.GetVisibleBlocks(viewStart, viewEnd))
+        {
+            if (block.Type != CodeBlockType.Excalidraw || block.Content.Length <= 50) continue;
+            int startScreen = AbsoluteToScreenRow(block.StartAbsRow);
+            double drawY = Math.Max(0, startScreen * _cellHeight);
+            double drawH = 300;
+            if (pos.Y >= drawY && pos.Y <= drawY + drawH)
+                return block;
+        }
+        return null;
+    }
+
+    private async Task ExportDiagramAsPng(CodeBlockInfo block)
+    {
+        try
+        {
+            var pngBytes = RenderDiagramToPng(block, 1200, 600);
+            if (pngBytes == null) return;
+
+            var topLevel = TopLevel.GetTopLevel(this);
+            if (topLevel == null) return;
+
+            var file = await topLevel.StorageProvider.SaveFilePickerAsync(new FilePickerSaveOptions
+            {
+                Title = Services.Loc.Get("SaveImage"),
+                DefaultExtension = "png",
+                FileTypeChoices = new[]
+                {
+                    new FilePickerFileType("PNG Image") { Patterns = new[] { "*.png" } }
+                },
+                SuggestedFileName = $"diagram_{DateTime.Now:yyyyMMdd_HHmmss}.png"
+            });
+
+            if (file != null)
+            {
+                await using var stream = await file.OpenWriteAsync();
+                await stream.WriteAsync(pngBytes);
+            }
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"ExportDiagramAsPng error: {ex.Message}");
+        }
+    }
+
+    private async Task CopyDiagramToClipboard(CodeBlockInfo block)
+    {
+        try
+        {
+            var pngBytes = RenderDiagramToPng(block, 1200, 600);
+            if (pngBytes == null) return;
+
+            var tempPath = Path.Combine(Path.GetTempPath(), "ClaudeCodeMDI", $"diagram_{DateTime.Now:yyyyMMdd_HHmmss}.png");
+            Directory.CreateDirectory(Path.GetDirectoryName(tempPath)!);
+            await File.WriteAllBytesAsync(tempPath, pngBytes);
+
+            var clipboard = TopLevel.GetTopLevel(this)?.Clipboard;
+            if (clipboard != null)
+                await clipboard.SetTextAsync(tempPath);
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"CopyDiagramToClipboard error: {ex.Message}");
+        }
+    }
+
+    private byte[]? RenderDiagramToPng(CodeBlockInfo block, int width, int height)
+    {
+        try
+        {
+            var bitmap = new Avalonia.Media.Imaging.RenderTargetBitmap(new PixelSize(width, height));
+            using (var ctx = bitmap.CreateDrawingContext())
+            {
+                var bgDefault = _isDark ? Color.FromRgb(28, 28, 30) : Color.FromRgb(255, 255, 255);
+                // Create a temporary block with adjusted coordinates for full-size render
+                var fakeBlock = block with { StartAbsRow = 0, EndAbsRow = 0 };
+                // Draw directly using the same method but with adjusted dimensions
+                var bg = _isDark ? Color.FromRgb(30, 30, 34) : Color.FromRgb(252, 252, 255);
+                ctx.FillRectangle(new SolidColorBrush(bg), new Rect(0, 0, width, height));
+
+                var cleanJson = CleanJsonWhitespace(block.Content);
+                var elements = System.Text.Json.JsonSerializer.Deserialize<System.Text.Json.JsonElement>(cleanJson);
+                if (elements.ValueKind != System.Text.Json.JsonValueKind.Array) return null;
+
+                var elementMap = new Dictionary<string, System.Text.Json.JsonElement>();
+                foreach (var el in elements.EnumerateArray())
+                {
+                    var type = el.TryGetProperty("type", out var t) ? t.GetString() : null;
+                    if (type == "cameraUpdate" || type == null) continue;
+                    if (type == "delete")
+                    {
+                        if (el.TryGetProperty("ids", out var ids))
+                            foreach (var id in (ids.GetString() ?? "").Split(','))
+                                elementMap.Remove(id.Trim());
+                        continue;
+                    }
+                    if (el.TryGetProperty("id", out var idProp))
+                        elementMap[idProp.GetString() ?? ""] = el;
+                }
+                var drawables = new List<System.Text.Json.JsonElement>(elementMap.Values);
+
+                double minX = double.MaxValue, minY = double.MaxValue;
+                double maxX = double.MinValue, maxY = double.MinValue;
+                foreach (var el in drawables)
+                {
+                    double ex = el.TryGetProperty("x", out var xp) ? xp.GetDouble() : 0;
+                    double ey = el.TryGetProperty("y", out var yp) ? yp.GetDouble() : 0;
+                    double ew = el.TryGetProperty("width", out var wp) ? wp.GetDouble() : 0;
+                    double eh = el.TryGetProperty("height", out var hp) ? hp.GetDouble() : 0;
+                    double textW = 0;
+                    if ((el.TryGetProperty("type", out var tp2) ? tp2.GetString() : "") == "text" && el.TryGetProperty("text", out var txt))
+                        textW = (txt.GetString()?.Length ?? 0) * 8;
+                    minX = Math.Min(minX, ex);
+                    minY = Math.Min(minY, ey);
+                    maxX = Math.Max(maxX, ex + Math.Max(ew, textW));
+                    maxY = Math.Max(maxY, ey + Math.Max(eh, 20));
+                }
+                if (!double.IsFinite(minX)) return null;
+
+                double contentW = maxX - minX + 40;
+                double contentH = maxY - minY + 40;
+                double scale = Math.Min((width - 40) / contentW, (height - 40) / contentH);
+                double offsetX = 20 + ((width - 40) - contentW * scale) / 2 - minX * scale;
+                double offsetY = 20 + ((height - 40) - contentH * scale) / 2 - minY * scale;
+
+                foreach (var el in drawables)
+                {
+                    var type = el.TryGetProperty("type", out var tp) ? tp.GetString() : "";
+                    double ex2 = (el.TryGetProperty("x", out var xp2) ? xp2.GetDouble() : 0) * scale + offsetX;
+                    double ey2 = (el.TryGetProperty("y", out var yp2) ? yp2.GetDouble() : 0) * scale + offsetY;
+                    double ew2 = (el.TryGetProperty("width", out var wp2) ? wp2.GetDouble() : 0) * scale;
+                    double eh2 = (el.TryGetProperty("height", out var hp2) ? hp2.GetDouble() : 0) * scale;
+                    var strokeStr = el.TryGetProperty("strokeColor", out var sc2) ? sc2.GetString() : "#1e1e1e";
+                    var fillStr = el.TryGetProperty("backgroundColor", out var bc2) ? bc2.GetString() : "transparent";
+                    double opacity = el.TryGetProperty("opacity", out var op2) ? op2.GetDouble() / 100.0 : 1.0;
+                    double sw = (el.TryGetProperty("strokeWidth", out var swp2) ? swp2.GetDouble() : 1) * Math.Min(scale, 1.5);
+
+                    Color strokeColor = ParseColor(strokeStr, Color.FromRgb(30, 30, 30));
+                    Color fillColor = ParseColor(fillStr, Colors.Transparent);
+                    if (opacity < 1)
+                    {
+                        strokeColor = Color.FromArgb((byte)(opacity * 255), strokeColor.R, strokeColor.G, strokeColor.B);
+                        fillColor = Color.FromArgb((byte)(opacity * 255), fillColor.R, fillColor.G, fillColor.B);
+                    }
+
+                    if (type == "rectangle")
+                    {
+                        var rect = new Rect(ex2, ey2, Math.Max(1, ew2), Math.Max(1, eh2));
+                        bool hasRoundness = el.TryGetProperty("roundness", out _);
+                        if (fillColor.A > 0 && fillStr != "transparent")
+                            ctx.FillRectangle(new SolidColorBrush(fillColor), rect, (float)(hasRoundness ? 6 : 0));
+                        if (strokeStr != "transparent" && sw > 0)
+                            ctx.DrawRectangle(null, new Pen(new SolidColorBrush(strokeColor), sw), rect, (float)(hasRoundness ? 6 : 0), (float)(hasRoundness ? 6 : 0));
+                        if (el.TryGetProperty("label", out var label) && label.TryGetProperty("text", out var lt))
+                        {
+                            double lfs = (label.TryGetProperty("fontSize", out var lf) ? lf.GetDouble() : 16) * scale;
+                            lfs = Math.Max(10, Math.Min(lfs, 36));
+                            var ft = new FormattedText(lt.GetString() ?? "", CultureInfo.CurrentCulture, FlowDirection.LeftToRight, _typeface, lfs, new SolidColorBrush(strokeColor));
+                            ctx.DrawText(ft, new Point(ex2 + (ew2 - ft.Width) / 2, ey2 + (eh2 - ft.Height) / 2));
+                        }
+                    }
+                    else if (type == "text")
+                    {
+                        var text = el.TryGetProperty("text", out var tt) ? tt.GetString() ?? "" : "";
+                        double fs = (el.TryGetProperty("fontSize", out var fsp) ? fsp.GetDouble() : 16) * scale;
+                        fs = Math.Max(10, Math.Min(fs, 42));
+                        double ty = ey2;
+                        foreach (var line in text.Split('\n'))
+                        {
+                            var ft = new FormattedText(line, CultureInfo.CurrentCulture, FlowDirection.LeftToRight, _typeface, fs, new SolidColorBrush(strokeColor));
+                            ctx.DrawText(ft, new Point(ex2, ty));
+                            ty += fs * 1.3;
+                        }
+                    }
+                    else if (type == "arrow" || type == "line")
+                    {
+                        var pen = new Pen(new SolidColorBrush(strokeColor), sw);
+                        if (el.TryGetProperty("points", out var pts) && pts.ValueKind == System.Text.Json.JsonValueKind.Array)
+                        {
+                            var pointList = new List<Point>();
+                            foreach (var pt in pts.EnumerateArray())
+                            {
+                                int idx = 0; double px = 0, py = 0;
+                                foreach (var v in pt.EnumerateArray()) { if (idx == 0) px = v.GetDouble(); else if (idx == 1) py = v.GetDouble(); idx++; }
+                                if (idx >= 2) pointList.Add(new Point(ex2 + px * scale, ey2 + py * scale));
+                            }
+                            for (int i = 0; i < pointList.Count - 1; i++) ctx.DrawLine(pen, pointList[i], pointList[i + 1]);
+                            if (type == "arrow" && pointList.Count >= 2 && el.TryGetProperty("endArrowhead", out var ea2) && ea2.GetString() != null)
+                            {
+                                var last = pointList[^1]; var prev = pointList[^2];
+                                double angle = Math.Atan2(last.Y - prev.Y, last.X - prev.X);
+                                double arrLen = 10 * scale;
+                                ctx.DrawLine(pen, last, new Point(last.X - arrLen * Math.Cos(angle - 0.4), last.Y - arrLen * Math.Sin(angle - 0.4)));
+                                ctx.DrawLine(pen, last, new Point(last.X - arrLen * Math.Cos(angle + 0.4), last.Y - arrLen * Math.Sin(angle + 0.4)));
+                            }
+                        }
+                    }
+                    else if (type == "ellipse")
+                    {
+                        var geo = new EllipseGeometry(new Rect(ex2, ey2, Math.Max(1, ew2), Math.Max(1, eh2)));
+                        if (fillColor.A > 0 && fillStr != "transparent") ctx.DrawGeometry(new SolidColorBrush(fillColor), null, geo);
+                        if (strokeStr != "transparent" && sw > 0) ctx.DrawGeometry(null, new Pen(new SolidColorBrush(strokeColor), sw), geo);
+                    }
+                }
+            }
+
+            using var ms = new MemoryStream();
+            bitmap.Save(ms);
+            return ms.ToArray();
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"RenderDiagramToPng error: {ex.Message}");
+            return null;
+        }
+    }
+
     // ── Export ──
 
     public string GetPreviewText(int maxLines = 10)
@@ -1904,12 +2453,12 @@ public class TerminalControl : Control, IDisposable
 
     public override void Render(DrawingContext context)
     {
-        var bgDefault = _isDark ? Color.FromRgb(28, 28, 30) : Color.FromRgb(255, 255, 255);    // Apple systemBackground
-        var fgDefault = _isDark ? Color.FromRgb(210, 210, 215) : Color.FromRgb(28, 28, 30);
+        var bgDefault = _isDark ? Color.FromRgb(28, 28, 30) : Color.FromRgb(255, 255, 255);    // Light: Tango Light white
+        var fgDefault = _isDark ? Color.FromRgb(210, 210, 215) : Color.FromRgb(85, 87, 83);  // Light: Tango Light foreground
         double termH = TerminalAreaHeight;
 
         // Draw entire control background (covers area around input box / expand button)
-        var inputBg = _isDark ? Color.FromRgb(44, 44, 46) : Color.FromRgb(242, 242, 247);
+        var inputBg = _isDark ? Color.FromRgb(44, 44, 46) : Color.FromRgb(242, 242, 242); // Light: Tango Light input area
         context.FillRectangle(new SolidColorBrush(inputBg), new Rect(0, 0, Bounds.Width, Bounds.Height));
 
         // Draw terminal background
@@ -1936,11 +2485,39 @@ public class TerminalControl : Control, IDisposable
 
         bool focused = _inputTextBox.IsFocused;
 
+        // Pre-compute screen rows covered by Excalidraw diagrams (to skip cell drawing there)
+        var diagramRowRanges = new List<(int start, int end)>();
+        if (EnableChartRendering)
+        {
+            int vStart = ScreenRowToAbsolute(0);
+            int vEnd = ScreenRowToAbsolute(_buffer.Rows - 1);
+            foreach (var block in _codeBlockDetector.GetVisibleBlocks(vStart, vEnd))
+            {
+                if (block.Type == CodeBlockType.Excalidraw && block.Content.Length > 50)
+                {
+                    int s = Math.Max(0, AbsoluteToScreenRow(block.StartAbsRow));
+                    // Cover from block start to block end (includes checkpointId response)
+                    int blockEnd = AbsoluteToScreenRow(block.EndAbsRow);
+                    int diagRows = (int)(300 / _cellHeight);
+                    int e = Math.Min(_buffer.Rows - 1, Math.Max(blockEnd, s + diagRows));
+                    diagramRowRanges.Add((s, e));
+                }
+            }
+        }
+
         // Draw cells
         for (int row = 0; row < _buffer.Rows; row++)
         {
             double y = row * _cellHeight;
             if (y + _cellHeight > termH) break; // Don't render beyond terminal area
+
+            // Skip rows covered by inline diagrams
+            bool skipRow = false;
+            foreach (var (ds, de) in diagramRowRanges)
+            {
+                if (row >= ds && row <= de) { skipRow = true; break; }
+            }
+            if (skipRow) continue;
 
             double x = 0;
             for (int col = 0; col < _buffer.Cols; col++)
@@ -2029,6 +2606,331 @@ public class TerminalControl : Control, IDisposable
                 x += cellW;
             }
         }
+
+        // Draw code block cards (overlay on detected renderable blocks)
+        DrawCodeBlockCards(context, bgDefault, termH);
+    }
+
+    private void DrawCodeBlockCards(DrawingContext context, Color bgDefault, double termH)
+    {
+        if (!EnableChartRendering) return;
+
+        int viewStart = ScreenRowToAbsolute(0);
+        int viewEnd = ScreenRowToAbsolute(_buffer.Rows - 1);
+        var visibleBlocks = _codeBlockDetector.GetVisibleBlocks(viewStart, viewEnd);
+
+        foreach (var block in visibleBlocks)
+        {
+            if (block.Type == CodeBlockType.Excalidraw && block.Content.Length > 50)
+            {
+                DrawExcalidrawInline(context, block, bgDefault, termH);
+            }
+        }
+    }
+
+    private void DrawExcalidrawInline(DrawingContext context, CodeBlockInfo block, Color bgDefault, double termH)
+    {
+        // Calculate where to draw: at the start of the code block
+        int startScreen = AbsoluteToScreenRow(block.StartAbsRow);
+        if (startScreen >= _buffer.Rows) return;
+
+        double drawY = Math.Max(0, startScreen * _cellHeight);
+        double drawW = Math.Min(_buffer.Cols * _cellWidth, Bounds.Width - ScrollbarWidth) - 20;
+        double drawH = Math.Min(300, termH - drawY);
+        if (drawH < 50) return;
+
+        var drawRect = new Rect(10, drawY, drawW, drawH);
+
+        // Background
+        var bg = _isDark ? Color.FromRgb(30, 30, 34) : Color.FromRgb(252, 252, 255);
+        context.FillRectangle(new SolidColorBrush(bg), drawRect);
+
+        // Border
+        var borderPen = new Pen(new SolidColorBrush(_isDark
+            ? Color.FromRgb(60, 60, 65) : Color.FromRgb(200, 200, 210)), 1);
+        context.DrawRectangle(null, borderPen, drawRect);
+
+        // Parse and render Excalidraw elements (with cache fallback for resize tolerance)
+        List<System.Text.Json.JsonElement> drawables;
+        double minX, minY, maxX, maxY;
+        try
+        {
+            // Pre-process JSON: collapse whitespace and strip non-ASCII outside strings
+            var cleanJson = CleanJsonWhitespace(block.Content);
+            var elements = System.Text.Json.JsonSerializer.Deserialize<System.Text.Json.JsonElement>(cleanJson);
+            if (elements.ValueKind != System.Text.Json.JsonValueKind.Array) return;
+
+            // Process delete operations and collect drawable elements
+            var elementMap = new Dictionary<string, System.Text.Json.JsonElement>();
+            foreach (var el in elements.EnumerateArray())
+            {
+                var type = el.TryGetProperty("type", out var t) ? t.GetString() : null;
+                if (type == "cameraUpdate" || type == null) continue;
+                if (type == "delete")
+                {
+                    if (el.TryGetProperty("ids", out var ids))
+                        foreach (var id in (ids.GetString() ?? "").Split(','))
+                            elementMap.Remove(id.Trim());
+                    continue;
+                }
+                if (el.TryGetProperty("id", out var idProp))
+                    elementMap[idProp.GetString() ?? ""] = el;
+            }
+
+            drawables = new List<System.Text.Json.JsonElement>(elementMap.Values);
+
+            // Find bounding box
+            minX = double.MaxValue; minY = double.MaxValue;
+            maxX = double.MinValue; maxY = double.MinValue;
+            foreach (var el in drawables)
+            {
+                double ex = el.TryGetProperty("x", out var xp) ? xp.GetDouble() : 0;
+                double ey = el.TryGetProperty("y", out var yp) ? yp.GetDouble() : 0;
+                double ew = el.TryGetProperty("width", out var wp) ? wp.GetDouble() : 0;
+                double eh = el.TryGetProperty("height", out var hp) ? hp.GetDouble() : 0;
+                var type = el.TryGetProperty("type", out var tp) ? tp.GetString() : "";
+                double textW = 0;
+                if (type == "text" && el.TryGetProperty("text", out var txt))
+                    textW = (txt.GetString()?.Length ?? 0) * 8;
+                minX = Math.Min(minX, ex);
+                minY = Math.Min(minY, ey);
+                maxX = Math.Max(maxX, ex + Math.Max(ew, textW));
+                maxY = Math.Max(maxY, ey + Math.Max(eh, 20));
+            }
+
+            if (!double.IsFinite(minX) || drawables.Count == 0) return;
+
+            // Cache successful parse for fallback after terminal reflow
+            _excalidrawCacheDrawables = drawables;
+            _excalidrawCacheMinX = minX; _excalidrawCacheMinY = minY;
+            _excalidrawCacheMaxX = maxX; _excalidrawCacheMaxY = maxY;
+        }
+        catch
+        {
+            // Parse failed (e.g., after terminal reflow corrupted JSON) — use cached result
+            if (_excalidrawCacheDrawables != null)
+            {
+                drawables = _excalidrawCacheDrawables;
+                minX = _excalidrawCacheMinX; minY = _excalidrawCacheMinY;
+                maxX = _excalidrawCacheMaxX; maxY = _excalidrawCacheMaxY;
+            }
+            else
+                return; // No cache available, skip rendering
+        }
+        try
+        {
+
+            double contentW = maxX - minX + 40;
+            double contentH = maxY - minY + 40;
+            double scale = Math.Min((drawW - 20) / contentW, (drawH - 10) / contentH);
+            scale = Math.Min(scale, 2);
+            double offsetX = drawRect.X + 10 + ((drawW - 20) - contentW * scale) / 2 - minX * scale;
+            double offsetY = drawRect.Y + 5 + ((drawH - 10) - contentH * scale) / 2 - minY * scale;
+
+            // Clip to draw area
+            using (context.PushClip(drawRect))
+            {
+                foreach (var el in drawables)
+                {
+                    var type = el.TryGetProperty("type", out var tp) ? tp.GetString() : "";
+                    double ex = (el.TryGetProperty("x", out var xp) ? xp.GetDouble() : 0) * scale + offsetX;
+                    double ey = (el.TryGetProperty("y", out var yp) ? yp.GetDouble() : 0) * scale + offsetY;
+                    double ew = (el.TryGetProperty("width", out var wp) ? wp.GetDouble() : 0) * scale;
+                    double eh = (el.TryGetProperty("height", out var hp) ? hp.GetDouble() : 0) * scale;
+                    var strokeStr = el.TryGetProperty("strokeColor", out var sc) ? sc.GetString() : "#1e1e1e";
+                    var fillStr = el.TryGetProperty("backgroundColor", out var bc) ? bc.GetString() : "transparent";
+                    double opacity = el.TryGetProperty("opacity", out var op) ? op.GetDouble() / 100.0 : 1.0;
+                    double sw = (el.TryGetProperty("strokeWidth", out var swp) ? swp.GetDouble() : 1) * Math.Min(scale, 1);
+
+                    Color strokeColor = ParseColor(strokeStr, _isDark ? Color.FromRgb(210, 210, 215) : Color.FromRgb(30, 30, 30));
+                    Color fillColor = ParseColor(fillStr, Colors.Transparent);
+
+                    // Adjust text/stroke contrast for readability on diagram background
+                    strokeColor = AdjustColorForContrast(strokeColor, _isDark);
+
+                    if (opacity < 1)
+                    {
+                        strokeColor = Color.FromArgb((byte)(opacity * 255), strokeColor.R, strokeColor.G, strokeColor.B);
+                        fillColor = Color.FromArgb((byte)(opacity * 255), fillColor.R, fillColor.G, fillColor.B);
+                    }
+
+                    if (type == "rectangle")
+                    {
+                        var rect = new Rect(ex, ey, Math.Max(1, ew), Math.Max(1, eh));
+                        bool hasRoundness = el.TryGetProperty("roundness", out _);
+                        if (fillColor.A > 0 && fillStr != "transparent")
+                            context.FillRectangle(new SolidColorBrush(fillColor), rect, (float)(hasRoundness ? 6 : 0));
+                        if (strokeStr != "transparent" && sw > 0)
+                            context.DrawRectangle(null, new Pen(new SolidColorBrush(strokeColor), sw), rect, (float)(hasRoundness ? 6 : 0), (float)(hasRoundness ? 6 : 0));
+
+                        // Label
+                        if (el.TryGetProperty("label", out var label) && label.TryGetProperty("text", out var lt))
+                        {
+                            double lfs = (label.TryGetProperty("fontSize", out var lf) ? lf.GetDouble() : 16) * scale;
+                            lfs = Math.Max(8, Math.Min(lfs, 24));
+                            var ft = new FormattedText(lt.GetString() ?? "", CultureInfo.CurrentCulture,
+                                FlowDirection.LeftToRight, _typeface, lfs, new SolidColorBrush(strokeColor));
+                            context.DrawText(ft, new Point(ex + (ew - ft.Width) / 2, ey + (eh - ft.Height) / 2));
+                        }
+                    }
+                    else if (type == "text")
+                    {
+                        var text = el.TryGetProperty("text", out var tt) ? tt.GetString() ?? "" : "";
+                        double fs = (el.TryGetProperty("fontSize", out var fsp) ? fsp.GetDouble() : 16) * scale;
+                        fs = Math.Max(8, Math.Min(fs, 28));
+                        foreach (var line in text.Split('\n'))
+                        {
+                            var ft = new FormattedText(line, CultureInfo.CurrentCulture,
+                                FlowDirection.LeftToRight, _typeface, fs, new SolidColorBrush(strokeColor));
+                            context.DrawText(ft, new Point(ex, ey));
+                            ey += fs * 1.3;
+                        }
+                    }
+                    else if (type == "arrow" || type == "line")
+                    {
+                        var pen = new Pen(new SolidColorBrush(strokeColor), sw);
+                        if (el.TryGetProperty("points", out var pts) && pts.ValueKind == System.Text.Json.JsonValueKind.Array)
+                        {
+                            var pointList = new List<Point>();
+                            foreach (var pt in pts.EnumerateArray())
+                            {
+                                int idx = 0;
+                                double px = 0, py = 0;
+                                foreach (var v in pt.EnumerateArray())
+                                {
+                                    if (idx == 0) px = v.GetDouble();
+                                    else if (idx == 1) py = v.GetDouble();
+                                    idx++;
+                                }
+                                if (idx >= 2)
+                                    pointList.Add(new Point(ex + px * scale, ey + py * scale));
+                            }
+                            for (int i = 0; i < pointList.Count - 1; i++)
+                                context.DrawLine(pen, pointList[i], pointList[i + 1]);
+
+                            // Arrowhead
+                            if (type == "arrow" && pointList.Count >= 2 &&
+                                el.TryGetProperty("endArrowhead", out var ea) && ea.GetString() != null)
+                            {
+                                var last = pointList[^1];
+                                var prev = pointList[^2];
+                                double angle = Math.Atan2(last.Y - prev.Y, last.X - prev.X);
+                                double arrLen = 8 * scale;
+                                context.DrawLine(pen, last,
+                                    new Point(last.X - arrLen * Math.Cos(angle - 0.4), last.Y - arrLen * Math.Sin(angle - 0.4)));
+                                context.DrawLine(pen, last,
+                                    new Point(last.X - arrLen * Math.Cos(angle + 0.4), last.Y - arrLen * Math.Sin(angle + 0.4)));
+                            }
+
+                            // Arrow label
+                            if (el.TryGetProperty("label", out var al) && al.TryGetProperty("text", out var alt) && pointList.Count >= 2)
+                            {
+                                var mid = pointList[pointList.Count / 2];
+                                double lfs = (al.TryGetProperty("fontSize", out var alf) ? alf.GetDouble() : 14) * scale;
+                                lfs = Math.Max(8, Math.Min(lfs, 20));
+                                var ft = new FormattedText(alt.GetString() ?? "", CultureInfo.CurrentCulture,
+                                    FlowDirection.LeftToRight, _typeface, lfs, new SolidColorBrush(strokeColor));
+                                context.DrawText(ft, new Point(mid.X - ft.Width / 2, mid.Y - ft.Height - 4));
+                            }
+                        }
+                    }
+                    else if (type == "ellipse")
+                    {
+                        var center = new Point(ex + ew / 2, ey + eh / 2);
+                        var geo = new EllipseGeometry(new Rect(ex, ey, Math.Max(1, ew), Math.Max(1, eh)));
+                        if (fillColor.A > 0 && fillStr != "transparent")
+                            context.DrawGeometry(new SolidColorBrush(fillColor), null, geo);
+                        if (strokeStr != "transparent" && sw > 0)
+                            context.DrawGeometry(null, new Pen(new SolidColorBrush(strokeColor), sw), geo);
+                    }
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"[DrawExcalidraw] Error: {ex.Message}");
+            // Show error visually in the draw area (visible in Release mode too)
+            var errText = new FormattedText($"Render Error: {ex.Message}",
+                CultureInfo.CurrentCulture, FlowDirection.LeftToRight,
+                _typeface, 11, new SolidColorBrush(Color.FromRgb(255, 100, 100)));
+            context.DrawText(errText, new Point(drawRect.X + 10, drawRect.Y + 10));
+        }
+    }
+
+    private static Color ParseColor(string? hex, Color defaultColor)
+    {
+        if (string.IsNullOrEmpty(hex) || hex == "transparent") return Colors.Transparent;
+        try { return Color.Parse(hex); } catch { return defaultColor; }
+    }
+
+    /// <summary>
+    /// Adjust stroke/text colors for readability on the diagram background.
+    /// Dark mode bg ≈ #1e1e22, Light mode bg ≈ #fcfcff.
+    /// Colors too close to the background are shifted for contrast.
+    /// </summary>
+    private static Color AdjustColorForContrast(Color c, bool isDark)
+    {
+        double brightness = (c.R * 0.299 + c.G * 0.587 + c.B * 0.114) / 255.0;
+        if (isDark)
+        {
+            // Dark background: colors with brightness < 0.3 are too dark to read
+            if (brightness < 0.3)
+                return Color.FromRgb(
+                    (byte)Math.Min(255, 255 - c.R + 40),
+                    (byte)Math.Min(255, 255 - c.G + 40),
+                    (byte)Math.Min(255, 255 - c.B + 40));
+        }
+        else
+        {
+            // Light background: colors with brightness > 0.7 are too light to read
+            if (brightness > 0.7)
+                return Color.FromRgb(
+                    (byte)Math.Max(0, c.R - 180),
+                    (byte)Math.Max(0, c.G - 180),
+                    (byte)Math.Max(0, c.B - 180));
+        }
+        return c;
+    }
+
+    /// <summary>
+    /// Clean JSON that has been extracted from terminal output.
+    /// Terminal line wrapping inserts extra whitespace (spaces, newlines)
+    /// into the JSON content, potentially breaking parsing.
+    /// This method collapses runs of whitespace outside string values.
+    /// </summary>
+    /// <summary>
+    /// Minify JSON by removing ALL whitespace outside string values.
+    /// This fixes terminal line-wrapping artifacts where numbers get split
+    /// across rows (e.g., "800" becomes "80 0" due to wrapped indentation).
+    /// </summary>
+    private static string CleanJsonWhitespace(string json)
+    {
+        var sb = new System.Text.StringBuilder(json.Length);
+        bool inString = false;
+        bool escape = false;
+
+        for (int i = 0; i < json.Length; i++)
+        {
+            char c = json[i];
+
+            if (escape) { sb.Append(c); escape = false; continue; }
+            if (c == '\\' && inString) { sb.Append(c); escape = true; continue; }
+            if (c == '"') { inString = !inString; sb.Append(c); continue; }
+
+            if (inString)
+            {
+                sb.Append(c);
+            }
+            else if (c > ' ' && c <= '~')
+            {
+                // Outside strings: only keep printable ASCII (0x21-0x7E).
+                // Strips whitespace AND non-ASCII characters (e.g., ⎿ ● from terminal formatting)
+                // that can leak into JSON during terminal reflow after resize.
+                sb.Append(c);
+            }
+        }
+
+        return sb.ToString();
     }
 
     private static void DrawBlockElement(DrawingContext ctx, char c, double x, double y, double w, double h, Color fg, IBrush brush)
@@ -2084,18 +2986,31 @@ public class TerminalControl : Control, IDisposable
             return defaultColor;
         }
 
-        // In light mode, adjust colors for readability on white background
-        if (!_isDark && !isFg)
+        if (!_isDark)
         {
-            // Convert dark background colors to light pastel equivalents
             double brightness = (c.R * 0.299 + c.G * 0.587 + c.B * 0.114) / 255.0;
-            if (brightness < 0.4)
+            if (isFg)
             {
-                // Lighten dark backgrounds: blend with white at 80%
-                c = Color.FromRgb(
-                    (byte)(c.R + (255 - c.R) * 0.80),
-                    (byte)(c.G + (255 - c.G) * 0.80),
-                    (byte)(c.B + (255 - c.B) * 0.80));
+                // Light mode foreground: darken colors that are too bright to read on white
+                if (brightness > 0.6)
+                {
+                    double factor = 0.45; // darken significantly
+                    c = Color.FromRgb(
+                        (byte)(c.R * factor),
+                        (byte)(c.G * factor),
+                        (byte)(c.B * factor));
+                }
+            }
+            else
+            {
+                // Light mode background: lighten dark backgrounds
+                if (brightness < 0.4)
+                {
+                    c = Color.FromRgb(
+                        (byte)(c.R + (255 - c.R) * 0.80),
+                        (byte)(c.G + (255 - c.G) * 0.80),
+                        (byte)(c.B + (255 - c.B) * 0.80));
+                }
             }
         }
         return c;
@@ -2121,24 +3036,25 @@ public class TerminalControl : Control, IDisposable
         Color.FromRgb(255, 255, 255),
     };
 
+    // Tango Light color scheme (matches Windows Terminal)
     private static readonly Color[] LightColors16 =
     {
-        Color.FromRgb(0, 0, 0),
-        Color.FromRgb(194, 24, 7),
-        Color.FromRgb(38, 162, 38),
-        Color.FromRgb(163, 138, 0),
-        Color.FromRgb(18, 72, 202),
-        Color.FromRgb(163, 28, 175),
-        Color.FromRgb(17, 168, 168),
-        Color.FromRgb(100, 100, 100),
-        Color.FromRgb(85, 85, 85),
-        Color.FromRgb(222, 56, 43),
-        Color.FromRgb(57, 181, 74),
-        Color.FromRgb(195, 163, 0),
-        Color.FromRgb(50, 100, 230),
-        Color.FromRgb(200, 60, 200),
-        Color.FromRgb(30, 185, 185),
-        Color.FromRgb(60, 60, 60),
+        Color.FromRgb(0, 0, 0),          // 0 Black
+        Color.FromRgb(204, 0, 0),        // 1 Red
+        Color.FromRgb(78, 154, 6),       // 2 Green
+        Color.FromRgb(196, 160, 0),      // 3 Yellow
+        Color.FromRgb(52, 101, 164),     // 4 Blue
+        Color.FromRgb(117, 80, 123),     // 5 Magenta
+        Color.FromRgb(6, 152, 154),      // 6 Cyan
+        Color.FromRgb(211, 215, 207),    // 7 White
+        Color.FromRgb(85, 87, 83),       // 8 Bright Black
+        Color.FromRgb(239, 41, 41),      // 9 Bright Red
+        Color.FromRgb(138, 226, 52),     // 10 Bright Green
+        Color.FromRgb(252, 233, 79),     // 11 Bright Yellow
+        Color.FromRgb(114, 159, 207),    // 12 Bright Blue
+        Color.FromRgb(173, 127, 168),    // 13 Bright Magenta
+        Color.FromRgb(52, 226, 226),     // 14 Bright Cyan
+        Color.FromRgb(238, 238, 236),    // 15 Bright White
     };
 
     private Color GetAnsiColor(int index)
