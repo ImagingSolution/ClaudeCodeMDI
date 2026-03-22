@@ -1991,33 +1991,30 @@ public class TerminalControl : Control, IDisposable
 
     private void OnPermissionCheckTick(object? sender, EventArgs e)
     {
-        if (!_isDocumentView || _permissionPopupShown) return;
+        if (!_isDocumentView) return;
 
         // Scan last 10 rows of terminal buffer for permission prompts
         int totalRows = _buffer.Scrollback.Count + _buffer.Rows;
         bool found = false;
-        string promptText = "";
 
         for (int i = Math.Max(0, totalRows - 10); i < totalRows; i++)
         {
             var text = GetRowText(i).TrimEnd();
-            if (text.Contains("Do you want to proceed") || text.Contains("Esc to cancel"))
+            if (text.Contains("Esc to cancel") || text.Contains("Do you want to proceed"))
             {
                 found = true;
-                promptText = text;
                 break;
             }
         }
 
-        if (found && !_permissionPopupShown)
+        if (found && _permissionOverlay == null)
         {
-            ShowPermissionOverlay(promptText);
+            ShowPermissionOverlay("");
             _permissionPopupShown = true;
         }
-        else if (!found && _permissionPopupShown)
+        else if (!found && _permissionOverlay != null)
         {
             HidePermissionOverlay();
-            _permissionPopupShown = false;
         }
     }
 
