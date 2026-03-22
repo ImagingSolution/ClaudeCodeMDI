@@ -138,6 +138,16 @@ public static class Loc
         ["SaveAsArtifact"] = new() { ["English"] = "Save as Artifact", ["日本語"] = "アーティファクトとして保存" },
         ["OpenArtifact"] = new() { ["English"] = "Open File", ["日本語"] = "ファイルを開く" },
         ["DiagramTooltip"] = new() { ["English"] = "Diagram Viewer", ["日本語"] = "ダイアグラムビューア" },
+        ["DocViewTooltip"] = new() { ["English"] = "Document View", ["日本語"] = "ドキュメントビュー" },
+        ["DOCVIEW"] = new() { ["English"] = "DOCUMENT VIEW", ["日本語"] = "ドキュメントビュー" },
+        ["CopyCode"] = new() { ["English"] = "Copy", ["日本語"] = "コピー" },
+        ["Thinking"] = new() { ["English"] = "Thinking...", ["日本語"] = "思考中..." },
+        ["NoSession"] = new() { ["English"] = "No session loaded", ["日本語"] = "セッションが読み込まれていません" },
+        ["PermissionRequired"] = new() { ["English"] = "Permission Required", ["日本語"] = "許可が必要です" },
+        ["AllowAction"] = new() { ["English"] = "Yes, allow", ["日本語"] = "はい、許可" },
+        ["AlwaysAllow"] = new() { ["English"] = "Always allow", ["日本語"] = "常に許可" },
+        ["DenyAction"] = new() { ["English"] = "No, deny", ["日本語"] = "いいえ、拒否" },
+        ["ToggleDocView"] = new() { ["English"] = "Toggle Document View", ["日本語"] = "ドキュメントビュー切替" },
     };
 
     public static string Get(string key)

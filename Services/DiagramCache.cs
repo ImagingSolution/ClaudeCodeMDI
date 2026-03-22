@@ -20,13 +20,14 @@ public static class DiagramCache
             Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
             ".claude", "projects");
 
-        // Find matching project directory
+        // Find matching project directory (normalize both sides for comparison)
         if (Directory.Exists(baseDir))
         {
             foreach (var dir in Directory.GetDirectories(baseDir))
             {
                 var dirName = Path.GetFileName(dir);
-                if (string.Equals(dirName, normalized, StringComparison.OrdinalIgnoreCase))
+                var normalizedDir = NormalizeFolderName(dirName);
+                if (normalizedDir.Equals(normalized, StringComparison.OrdinalIgnoreCase))
                     return Path.Combine(dir, "diagrams");
             }
         }
@@ -133,8 +134,24 @@ public static class DiagramCache
 
     private static string NormalizeFolderName(string path)
     {
-        return path.Replace(":", "-").Replace("\\", "-").Replace("/", "-")
-                   .Replace(" ", "-").ToLowerInvariant().Trim('-');
+        path = path.Replace('/', '\\').TrimEnd('\\');
+        var sb = new System.Text.StringBuilder(path.Length);
+        bool lastWasDash = false;
+        foreach (char c in path)
+        {
+            if (char.IsLetterOrDigit(c) && c <= 127)
+            {
+                sb.Append(c);
+                lastWasDash = false;
+            }
+            else
+            {
+                if (!lastWasDash)
+                    sb.Append('-');
+                lastWasDash = true;
+            }
+        }
+        return sb.ToString().Trim('-');
     }
 
     private static string CleanJsonWhitespace(string json)

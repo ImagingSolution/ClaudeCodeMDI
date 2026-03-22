@@ -140,10 +140,12 @@
         <Style Selector="ScrollBar:vertical">
             <Setter Property="Width" Value="8" />
             <Setter Property="MinWidth" Value="8" />
+            <Setter Property="Opacity" Value="1" />
         </Style>
         <Style Selector="ScrollBar:vertical /template/ Thumb">
             <Setter Property="MinWidth" Value="4" />
             <Setter Property="Width" Value="4" />
+            <Setter Property="Opacity" Value="1" />
         </Style>
         <Style Selector="ScrollBar:vertical:pointerover /template/ Thumb">
             <Setter Property="Width" Value="6" />

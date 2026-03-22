@@ -95,6 +95,16 @@ public class TerminalControl : Control, IDisposable
     private double _excalidrawCacheMinX, _excalidrawCacheMinY, _excalidrawCacheMaxX, _excalidrawCacheMaxY;
     public bool EnableChartRendering { get; set; } = true;
 
+    // Document view mode state
+    private bool _isDocumentView;
+    private Controls.DocumentViewPanel? _docViewPanel;
+    private string? _docViewSessionPath;
+    private DispatcherTimer? _permissionCheckTimer;
+    private bool _permissionPopupShown;
+    private Border? _permissionOverlay;
+    public bool IsDocumentView => _isDocumentView;
+    public event Action<bool>? DocumentViewChanged;
+
     public string TabTitle { get; private set; } = "Console";
     public bool IsManualTitle { get; set; }
     public string? FirstUserInput { get; set; }
@@ -155,6 +165,9 @@ public class TerminalControl : Control, IDisposable
             _searchTextBox.BorderBrush = new SolidColorBrush(border);
         }
 
+        // Document view theme
+        _docViewPanel?.UpdateTheme(_isDark);
+
         InvalidateVisual();
     }
 
@@ -169,6 +182,7 @@ public class TerminalControl : Control, IDisposable
         _fontSize = fontSize;
         _inputTextBox.FontFamily = new FontFamily(fontFamily + ", Consolas, Courier New");
         _inputTextBox.FontSize = fontSize;
+        _docViewPanel?.SetFont(fontFamily, fontSize);
         MeasureCellSize();
         RecalcTerminalSize();
         InvalidateVisual();
@@ -314,6 +328,14 @@ public class TerminalControl : Control, IDisposable
         return; // All control characters — ignore
     hasPrintable:
 
+        // Document view mode: accumulate all text in the input box until Enter
+        if (_isDocumentView)
+        {
+            // Let the TextBox handle the input naturally (don't send to PTY)
+            // Text stays in the input box until Enter is pressed
+            return;
+        }
+
         // Track input start on first text input after prompt
         if (_inputStartPending)
         {
@@ -341,11 +363,30 @@ public class TerminalControl : Control, IDisposable
     {
         // After IME commit, force-clear any preedit remnants that Avalonia
         // may have re-inserted after our clear in OnInputTextInput
-        if (_imeJustCommitted)
+        if (_imeJustCommitted && !_isDocumentView)
         {
             _imeJustCommitted = false;
             _inputTextBox.Text = "";
             _inputTextBox.CaretIndex = 0;
+        }
+
+        // In document view: text stays in input box, allow editing freely
+        // Only intercept Enter, Escape, and Ctrl shortcuts
+        if (_isDocumentView && !string.IsNullOrEmpty(_inputTextBox.Text))
+        {
+            if (e.Key == Key.Escape)
+            {
+                _inputTextBox.Text = "";
+                e.Handled = true;
+                return;
+            }
+            // Let Enter through to be handled below (sends accumulated text)
+            if (e.Key == Key.Enter)
+                goto handleKeys;
+            // Let Ctrl shortcuts through
+            bool isCtrl = e.KeyModifiers.HasFlag(KeyModifiers.Control);
+            if (!isCtrl)
+                return; // Let TextBox handle normal editing (Backspace, arrows, etc.)
         }
 
         // If TextBox has text, IME composition is in progress.
@@ -364,6 +405,7 @@ public class TerminalControl : Control, IDisposable
             if (!isCtrlShortcut)
                 return;
         }
+        handleKeys:
 
         // Track input start: record cursor position on first interaction after prompt
         if (_inputStartPending)
@@ -430,10 +472,19 @@ public class TerminalControl : Control, IDisposable
             return;
         }
 
-        // Ctrl+V: paste directly to PTY
+        // Ctrl+V: paste
         if (e.Key == Key.V && e.KeyModifiers.HasFlag(KeyModifiers.Control))
         {
-            _ = PasteFromClipboardAsync();
+            if (_isDocumentView)
+            {
+                // Document view: paste into IME input box
+                _ = PasteToInputBoxAsync();
+            }
+            else
+            {
+                // Terminal mode: paste directly to PTY
+                _ = PasteFromClipboardAsync();
+            }
             e.Handled = true;
             return;
         }
@@ -446,9 +497,32 @@ public class TerminalControl : Control, IDisposable
             return;
         }
 
-        // Enter: send carriage return to PTY (submit)
+        // Enter: send text to PTY
         if (e.Key == Key.Enter)
         {
+            // Document view mode: send accumulated text from input box, then \r
+            if (_isDocumentView && !string.IsNullOrEmpty(_inputTextBox.Text))
+            {
+                var text = _inputTextBox.Text;
+                _pty?.WriteInput(text);
+                _pty?.WriteInput("\r");
+                _inputTextBox.Text = "";
+                _inputTextBox.CaretIndex = 0;
+
+                // Capture first input as tab title
+                if (!_firstInputCaptured)
+                {
+                    _firstInputCaptured = true;
+                    FirstUserInput = text.Trim();
+                    var summary = FirstUserInput;
+                    if (summary.Length > 30) summary = summary[..30] + "...";
+                    if (!string.IsNullOrWhiteSpace(summary))
+                        TitleChanged?.Invoke(summary);
+                }
+                e.Handled = true;
+                return;
+            }
+
             // Record input position for prompt navigation
             int submitRow = ScreenRowToAbsolute(_buffer.CursorRow);
             // Only record if it's a different position from the last recorded one
@@ -640,6 +714,7 @@ public class TerminalControl : Control, IDisposable
 
     private void RecalcTerminalSize()
     {
+        if (_isDocumentView) return; // Don't resize PTY while in document view
         if (_cellWidth <= 0 || _cellHeight <= 0 || Bounds.Width <= 0) return;
         double termH = TerminalAreaHeight;
         int newCols = Math.Max(10, (int)(Bounds.Width / _cellWidth));
@@ -701,6 +776,16 @@ public class TerminalControl : Control, IDisposable
         if (_isExpanded)
             _expandedPanel.Measure(new Size(availableSize.Width, _expandedHeight));
         _searchBar?.Measure(availableSize);
+        if (_isDocumentView && _docViewPanel != null)
+        {
+            // Use Bounds for actual size (availableSize may be Infinity)
+            double actualH = Bounds.Height > 0 ? Bounds.Height : availableSize.Height;
+            double docH = Math.Max(0, actualH - InputAreaHeight - ExpandedPanelHeight);
+            _docViewPanel.Measure(new Size(
+                Bounds.Width > 0 ? Bounds.Width : availableSize.Width,
+                docH));
+        }
+        _permissionOverlay?.Measure(availableSize);
         return availableSize;
     }
 
@@ -722,6 +807,27 @@ public class TerminalControl : Control, IDisposable
             double tbW = Math.Max(0, finalSize.Width - ExpandButtonWidth);
             _inputTextBox.Arrange(new Rect(0, tbY, tbW, InputBoxHeight));
             _expandButton.Arrange(new Rect(tbW, tbY, ExpandButtonWidth, InputBoxHeight));
+        }
+
+        // Position document view panel (fills terminal area)
+        if (_docViewPanel != null)
+        {
+            if (_isDocumentView)
+            {
+                double docH = Math.Max(0, finalSize.Height - InputAreaHeight - ExpandedPanelHeight);
+                _docViewPanel.Arrange(new Rect(0, 0, finalSize.Width, docH));
+            }
+            else
+            {
+                _docViewPanel.Arrange(new Rect(0, finalSize.Height, 0, 0));
+            }
+        }
+
+        // Position permission overlay (centered, above input)
+        if (_permissionOverlay != null)
+        {
+            double docH = Math.Max(0, finalSize.Height - InputAreaHeight - ExpandedPanelHeight);
+            _permissionOverlay.Arrange(new Rect(0, 0, finalSize.Width, docH));
         }
 
         // Position search bar at top-right
@@ -1210,6 +1316,15 @@ public class TerminalControl : Control, IDisposable
         _isExpanded = true;
         _expandedHeight = Math.Max(80, Bounds.Height * 0.3);
         _expandedPanel.IsVisible = true;
+
+        // Transfer text from IME input to expanded input (useful in document view mode)
+        if (_isDocumentView && !string.IsNullOrEmpty(_inputTextBox.Text))
+        {
+            _expandedTextBox.Text = _inputTextBox.Text;
+            _expandedTextBox.CaretIndex = _expandedTextBox.Text.Length;
+            _inputTextBox.Text = "";
+        }
+
         _inputTextBox.IsVisible = false;
         _expandButton.IsVisible = false;
         _expandedTextBox.Focus();
@@ -1818,6 +1933,193 @@ public class TerminalControl : Control, IDisposable
         LogicalChildren.Add(_promptNavBar);
     }
 
+    // ── Document View Mode ──
+
+    public void SetDocumentViewSession(string? path)
+    {
+        _docViewSessionPath = path;
+        if (_isDocumentView && _docViewPanel != null && path != null)
+        {
+            _docViewPanel.LoadSession(path);
+            _docViewPanel.StartPolling();
+        }
+    }
+
+    public void ToggleDocumentView()
+    {
+        _isDocumentView = !_isDocumentView;
+
+        if (_isDocumentView)
+        {
+            // Create document view panel lazily
+            if (_docViewPanel == null)
+            {
+                _docViewPanel = new Controls.DocumentViewPanel(_isDark, _typeface);
+                VisualChildren.Add(_docViewPanel);
+                LogicalChildren.Add(_docViewPanel);
+            }
+
+            _docViewPanel.IsVisible = true;
+
+            if (_docViewSessionPath != null)
+            {
+                _docViewPanel.LoadSession(_docViewSessionPath);
+                _docViewPanel.StartPolling();
+            }
+
+            // Start permission check timer
+            _permissionCheckTimer ??= new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(500) };
+            _permissionCheckTimer.Tick += OnPermissionCheckTick;
+            _permissionCheckTimer.Start();
+        }
+        else
+        {
+            if (_docViewPanel != null)
+            {
+                _docViewPanel.IsVisible = false;
+                _docViewPanel.StopPolling();
+            }
+            _permissionCheckTimer?.Stop();
+            HidePermissionOverlay();
+        }
+
+        InvalidateMeasure();
+        InvalidateArrange();
+        InvalidateVisual();
+        DocumentViewChanged?.Invoke(_isDocumentView);
+    }
+
+    private void OnPermissionCheckTick(object? sender, EventArgs e)
+    {
+        if (!_isDocumentView || _permissionPopupShown) return;
+
+        // Scan last 10 rows of terminal buffer for permission prompts
+        int totalRows = _buffer.Scrollback.Count + _buffer.Rows;
+        bool found = false;
+        string promptText = "";
+
+        for (int i = Math.Max(0, totalRows - 10); i < totalRows; i++)
+        {
+            var text = GetRowText(i).TrimEnd();
+            if (text.Contains("Do you want to proceed") || text.Contains("Esc to cancel"))
+            {
+                found = true;
+                promptText = text;
+                break;
+            }
+        }
+
+        if (found && !_permissionPopupShown)
+        {
+            ShowPermissionOverlay(promptText);
+            _permissionPopupShown = true;
+        }
+        else if (!found && _permissionPopupShown)
+        {
+            HidePermissionOverlay();
+            _permissionPopupShown = false;
+        }
+    }
+
+    private void ShowPermissionOverlay(string promptText)
+    {
+        if (_permissionOverlay != null) return;
+
+        var yesBtn = new Button
+        {
+            Content = Services.Loc.Get("AllowAction", "Yes, allow"),
+            Background = new SolidColorBrush(Color.FromRgb(0, 122, 255)),
+            Foreground = Brushes.White,
+            Padding = new Thickness(16, 6),
+            BorderThickness = new Thickness(0),
+            CornerRadius = new CornerRadius(6),
+            Cursor = new Cursor(StandardCursorType.Hand),
+            Margin = new Thickness(4, 0),
+        };
+        yesBtn.Click += (_, _) => { _pty?.WriteInput("1\n"); HidePermissionOverlay(); };
+
+        var alwaysBtn = new Button
+        {
+            Content = Services.Loc.Get("AlwaysAllow", "Always allow"),
+            Background = new SolidColorBrush(Color.FromRgb(48, 209, 88)),
+            Foreground = Brushes.White,
+            Padding = new Thickness(16, 6),
+            BorderThickness = new Thickness(0),
+            CornerRadius = new CornerRadius(6),
+            Cursor = new Cursor(StandardCursorType.Hand),
+            Margin = new Thickness(4, 0),
+        };
+        alwaysBtn.Click += (_, _) => { _pty?.WriteInput("2\n"); HidePermissionOverlay(); };
+
+        var noBtn = new Button
+        {
+            Content = Services.Loc.Get("DenyAction", "No, deny"),
+            Background = new SolidColorBrush(_isDark ? Color.FromRgb(60, 60, 65) : Color.FromRgb(200, 200, 205)),
+            Foreground = new SolidColorBrush(_isDark ? Color.FromRgb(210, 210, 215) : Color.FromRgb(40, 40, 45)),
+            Padding = new Thickness(16, 6),
+            BorderThickness = new Thickness(0),
+            CornerRadius = new CornerRadius(6),
+            Cursor = new Cursor(StandardCursorType.Hand),
+            Margin = new Thickness(4, 0),
+        };
+        noBtn.Click += (_, _) => { _pty?.WriteInput("3\n"); HidePermissionOverlay(); };
+
+        var label = new TextBlock
+        {
+            Text = Services.Loc.Get("PermissionRequired", "Permission Required"),
+            FontSize = 14,
+            FontWeight = FontWeight.SemiBold,
+            Foreground = new SolidColorBrush(_isDark ? Color.FromRgb(220, 220, 225) : Color.FromRgb(28, 28, 30)),
+            HorizontalAlignment = HorizontalAlignment.Center,
+            Margin = new Thickness(0, 0, 0, 8),
+        };
+
+        var buttonPanel = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            HorizontalAlignment = HorizontalAlignment.Center,
+        };
+        buttonPanel.Children.Add(yesBtn);
+        buttonPanel.Children.Add(alwaysBtn);
+        buttonPanel.Children.Add(noBtn);
+
+        var content = new StackPanel
+        {
+            HorizontalAlignment = HorizontalAlignment.Center,
+            VerticalAlignment = VerticalAlignment.Center,
+        };
+        content.Children.Add(label);
+        content.Children.Add(buttonPanel);
+
+        _permissionOverlay = new Border
+        {
+            Background = new SolidColorBrush(Color.FromArgb(200, _isDark ? (byte)28 : (byte)240, _isDark ? (byte)28 : (byte)240, _isDark ? (byte)30 : (byte)245)),
+            Child = content,
+            Padding = new Thickness(20),
+            CornerRadius = new CornerRadius(12),
+            HorizontalAlignment = HorizontalAlignment.Center,
+            VerticalAlignment = VerticalAlignment.Bottom,
+            Margin = new Thickness(0, 0, 0, 40),
+            BoxShadow = new BoxShadows(new BoxShadow { OffsetY = 4, Blur = 16, Color = Color.FromArgb(80, 0, 0, 0) }),
+        };
+
+        VisualChildren.Add(_permissionOverlay);
+        LogicalChildren.Add(_permissionOverlay);
+        InvalidateMeasure();
+        InvalidateArrange();
+    }
+
+    private void HidePermissionOverlay()
+    {
+        if (_permissionOverlay == null) return;
+        VisualChildren.Remove(_permissionOverlay);
+        LogicalChildren.Remove(_permissionOverlay);
+        _permissionOverlay = null;
+        _permissionPopupShown = false;
+        InvalidateMeasure();
+        InvalidateArrange();
+    }
+
     // ── Diagram Cache ──
 
     private void AutoCacheNewDiagrams()
@@ -2391,7 +2693,7 @@ public class TerminalControl : Control, IDisposable
     {
         base.OnPointerWheelChanged(e);
 
-        // Ctrl+Scroll: font zoom
+        // Ctrl+Scroll: font zoom (works in both modes)
         if (e.KeyModifiers.HasFlag(KeyModifiers.Control))
         {
             double newSize = _fontSize + (e.Delta.Y > 0 ? 1 : -1);
@@ -2402,6 +2704,13 @@ public class TerminalControl : Control, IDisposable
                 FontSizeChanged?.Invoke(newSize);
             }
             e.Handled = true;
+            return;
+        }
+
+        // Document view: let ScrollViewer inside DocumentViewPanel handle scrolling
+        if (_isDocumentView)
+        {
+            // Don't handle - let the event bubble to the ScrollViewer
             return;
         }
 
@@ -2453,13 +2762,22 @@ public class TerminalControl : Control, IDisposable
 
     public override void Render(DrawingContext context)
     {
-        var bgDefault = _isDark ? Color.FromRgb(28, 28, 30) : Color.FromRgb(255, 255, 255);    // Light: Tango Light white
-        var fgDefault = _isDark ? Color.FromRgb(210, 210, 215) : Color.FromRgb(85, 87, 83);  // Light: Tango Light foreground
+        var bgDefault = _isDark ? Color.FromRgb(28, 28, 30) : Color.FromRgb(255, 255, 255);
+        var fgDefault = _isDark ? Color.FromRgb(210, 210, 215) : Color.FromRgb(85, 87, 83);
         double termH = TerminalAreaHeight;
 
-        // Draw entire control background (covers area around input box / expand button)
-        var inputBg = _isDark ? Color.FromRgb(44, 44, 46) : Color.FromRgb(242, 242, 242); // Light: Tango Light input area
+        // Draw entire control background
+        var inputBg = _isDark ? Color.FromRgb(44, 44, 46) : Color.FromRgb(242, 242, 242);
         context.FillRectangle(new SolidColorBrush(inputBg), new Rect(0, 0, Bounds.Width, Bounds.Height));
+
+        // Document view mode: skip all terminal cell rendering
+        if (_isDocumentView)
+        {
+            // Draw background for document view area
+            var docBg = _isDark ? Color.FromRgb(30, 30, 34) : Color.FromRgb(250, 250, 252);
+            context.FillRectangle(new SolidColorBrush(docBg), new Rect(0, 0, Bounds.Width, termH));
+            return;
+        }
 
         // Draw terminal background
         context.FillRectangle(new SolidColorBrush(bgDefault), new Rect(0, 0, Bounds.Width, termH));
@@ -3086,6 +3404,30 @@ public class TerminalControl : Control, IDisposable
     }
 
     public void SendText(string text) => _pty?.WriteInput(text);
+
+    private async Task PasteToInputBoxAsync()
+    {
+        var clipboard = TopLevel.GetTopLevel(this)?.Clipboard;
+        if (clipboard == null) return;
+        var text = await clipboard.GetTextAsync();
+        if (string.IsNullOrEmpty(text)) return;
+
+        // Insert at caret position
+        var current = _inputTextBox.Text ?? "";
+        var caretIndex = _inputTextBox.CaretIndex;
+        _inputTextBox.Text = current.Insert(caretIndex, text);
+        _inputTextBox.CaretIndex = caretIndex + text.Length;
+    }
+
+    /// <summary>
+    /// Set text in the IME input box (for document view mode where direct PTY send is hidden).
+    /// </summary>
+    public void SetInputText(string text)
+    {
+        _inputTextBox.Text = text;
+        _inputTextBox.CaretIndex = text.Length;
+        _inputTextBox.Focus();
+    }
 
     private void OnFileDragOver(object? sender, DragEventArgs e)
     {

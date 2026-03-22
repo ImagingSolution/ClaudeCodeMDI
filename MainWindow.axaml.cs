@@ -35,6 +35,7 @@ public partial class MainWindow : Window
     private int _activeChildIndex = -1;
     private readonly List<MdiChildInfo> _children = new();
     private readonly AppSettings _settings;
+    // DocView is now embedded in TerminalControl, not in MainWindow
 
     private bool _suppressFolderSelectionChanged;
 
@@ -161,6 +162,7 @@ public partial class MainWindow : Window
         ToolTip.SetTip(BtnActivitySnippets, Loc.Get("SnippetsTooltip"));
         ToolTip.SetTip(BtnActivityWindows, Loc.Get("WindowsTooltip"));
         ToolTip.SetTip(BtnActivityDiagram, Loc.Get("DiagramTooltip"));
+        ToolTip.SetTip(BtnActivityDocView, Loc.Get("DocViewTooltip"));
         ToolTip.SetTip(BtnActivityCompact, Loc.Get("CompactTooltip"));
         ToolTip.SetTip(BtnActivitySettings, Loc.Get("SettingsTooltip"));
 
@@ -222,6 +224,24 @@ public partial class MainWindow : Window
     private void OnActivityWindows(object? sender, RoutedEventArgs e)
     {
         ToggleSidePanel(SidebarPanel.Windows);
+    }
+
+    private void OnActivityDocView(object? sender, RoutedEventArgs e)
+    {
+        if (_activeChildIndex < 0 || _activeChildIndex >= _children.Count) return;
+        var terminal = _children[_activeChildIndex].Terminal;
+
+        // Find session JSONL path
+        string? sessionPath = null;
+        if (CmbSessions.SelectedItem is SessionInfo selected)
+            sessionPath = SessionMessageReader.FindSessionFile(_projectFolder ?? "", selected.Id);
+        sessionPath ??= SessionMessageReader.FindMostRecentSession(_projectFolder ?? "");
+
+        if (sessionPath != null)
+            terminal.SetDocumentViewSession(sessionPath);
+
+        terminal.ToggleDocumentView();
+        SetActivityButtonActive(BtnActivityDocView, terminal.IsDocumentView);
     }
 
     private async void OnActivityDiagram(object? sender, RoutedEventArgs e)
@@ -342,6 +362,7 @@ public partial class MainWindow : Window
         SetActivityButtonActive(BtnActivitySnippets, _activeSidePanel == SidebarPanel.Snippets);
         SetActivityButtonActive(BtnActivitySettings, _activeSidePanel == SidebarPanel.Settings);
         SetActivityButtonActive(BtnActivityWindows, _activeSidePanel == SidebarPanel.Windows);
+        // DocView button state is managed by OnActivityDocView, not side panel
     }
 
     private static void SetActivityButtonActive(Button btn, bool active)
@@ -746,6 +767,7 @@ public partial class MainWindow : Window
             child.TitleBar.Background = new SolidColorBrush(titleBarBg);
             child.TitleText.Foreground = new SolidColorBrush(titleFg);
         }
+        // DocView theme is updated via terminal.ApplyThemeColors()
     }
 
     private void UpdateThemeResources()
@@ -919,7 +941,11 @@ public partial class MainWindow : Window
             {
                 var terminal = _children[_activeChildIndex].Terminal;
                 var snippetText = textBox.Text.Replace("\\r", "\r");
-                if (terminal.IsExpanded)
+                if (terminal.IsDocumentView && terminal.IsExpanded)
+                    terminal.AppendToExpandedInput(snippetText);
+                else if (terminal.IsDocumentView)
+                    terminal.SetInputText(snippetText);
+                else if (terminal.IsExpanded)
                     terminal.AppendToExpandedInput(snippetText);
                 else
                     terminal.SendText(snippetText);
